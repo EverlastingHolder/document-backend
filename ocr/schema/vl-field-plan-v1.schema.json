@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "passport-vl-field-plan/v1",
+  "title": "Go-generated private PaddleOCR-VL crop plan",
+  "description": "A private plan produced and validated by Go. It contains no OCR output or reference values.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "image", "baseline_sha256", "plan_sha256", "regions", "skipped_fields"],
+  "properties": {
+    "schema_version": {"const": "passport-vl-field-plan/v1"},
+    "image": {"$ref": "#/$defs/image"},
+    "baseline_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "plan_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "regions": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {"$ref": "#/$defs/region"}
+    },
+    "skipped_fields": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field_id", "reason"],
+        "properties": {
+          "field_id": {"$ref": "#/$defs/field"},
+          "reason": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  },
+  "$defs": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "width", "height", "sha256", "coordinate_frame"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "coordinate_frame": {"const": "exif_normalized_pixels"}
+      }
+    },
+    "field": {"enum": ["surname", "given_name", "patronymic", "gender", "birth_place", "issuer"]},
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "field_id", "recipe", "crop", "anchor_line_ids"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "field_id": {"$ref": "#/$defs/field"},
+        "recipe": {"enum": ["registered_template_crop/v1", "baseline_candidate_rows/v1", "birth_date_neighbor/v1", "authority_text_block/v1", "coherent_name_rows/v1"]},
+        "crop": {"$ref": "#/$defs/rect"},
+        "anchor_line_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "rect": {
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}, {"type": "number"}],
+      "minItems": 4,
+      "maxItems": 4
+    }
+  }
+}

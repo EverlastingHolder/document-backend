@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "passport-field-evidence/v1",
+  "title": "Private supported-name ROI evidence",
+  "description": "Optional offline Go extractor sidecar. This does not alter the observations v1/v2 handoff or public API.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "image", "evidence"],
+  "properties": {
+    "schema_version": {"const": "passport-field-evidence/v1"},
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "width", "height", "coordinate_frame"],
+      "properties": {
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "coordinate_frame": {"const": "exif_normalized_pixels"}
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field_id", "role_quality", "proposal_method", "source_pass_ids", "source_line_ids", "name_row_line_ids", "adjacent_anchors", "roi_bounds", "geometry_scope", "reader", "reader_mode", "reader_model_sha256", "raw_text", "score", "quad"],
+        "properties": {
+          "field_id": {"const": "given_name"},
+          "role_quality": {"const": "supported_row"},
+          "proposal_method": {"const": "viz_layout_v1"},
+          "source_pass_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "source_line_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+          "name_row_line_ids": {
+            "type": "array", "minItems": 3, "maxItems": 3,
+            "items": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+          },
+          "adjacent_anchors": {
+            "type": "array", "minItems": 1, "maxItems": 1,
+            "items": {
+              "type": "object", "additionalProperties": false,
+              "required": ["role", "line_id", "pass_id", "relation"],
+              "properties": {
+                "role": {"const": "birth_date"},
+                "line_id": {"type": "string", "minLength": 1},
+                "pass_id": {"type": "string", "minLength": 1},
+                "relation": {"const": "upper_row_boundary"}
+              }
+            }
+          },
+          "roi_bounds": {"$ref": "#/$defs/rect"},
+          "geometry_scope": {"const": "entire_crop"},
+          "reader": {"const": "rapidocr"},
+          "reader_mode": {"const": "rec_only"},
+          "reader_model_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+          "raw_text": {"type": "string", "minLength": 1},
+          "score": {"type": "number", "minimum": 0, "maximum": 1},
+          "quad": {
+            "type": "array", "minItems": 4, "maxItems": 4,
+            "items": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "number"}}
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "rect": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number"}}
+  }
+}

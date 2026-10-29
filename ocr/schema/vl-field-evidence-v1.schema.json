@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "passport-vl-field-evidence/v1",
+  "title": "Private PaddleOCR-VL field evidence",
+  "description": "Private reader handoff bound to a Go-generated plan. It is an uncertain candidate source and cannot recognize a field by itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "image", "plan_sha256", "reader", "regions"],
+  "properties": {
+    "schema_version": {"const": "passport-vl-field-evidence/v1"},
+    "image": {"$ref": "#/$defs/image"},
+    "plan_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+    "reader": {"$ref": "#/$defs/reader"},
+    "regions": {"type": "array", "maxItems": 6, "items": {"$ref": "#/$defs/read"}}
+  },
+  "$defs": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "width", "height", "sha256", "coordinate_frame"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "coordinate_frame": {"const": "exif_normalized_pixels"}
+      }
+    },
+    "reader": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model_id", "model_tree_sha256", "backend", "device", "pipeline_version", "use_layout_detection", "use_doc_preprocessor"],
+      "properties": {
+        "model_id": {"const": "PaddleOCR-VL-1.6-0.9B"},
+        "model_tree_sha256": {"type": "string", "pattern": "^[A-Fa-f0-9]{64}$"},
+        "backend": {"const": "native"},
+        "device": {"const": "cpu"},
+        "pipeline_version": {"const": "v1.6"},
+        "use_layout_detection": {"const": false},
+        "use_doc_preprocessor": {"const": false}
+      }
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "field_id", "recipe", "crop", "anchor_line_ids"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "field_id": {"enum": ["surname", "given_name", "patronymic", "gender", "birth_place", "issuer"]},
+        "recipe": {"enum": ["registered_template_crop/v1", "baseline_candidate_rows/v1", "birth_date_neighbor/v1", "authority_text_block/v1", "coherent_name_rows/v1"]},
+        "crop": {"$ref": "#/$defs/rect"},
+        "anchor_line_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "rect": {
+      "type": "array",
+      "prefixItems": [{"type": "number"}, {"type": "number"}, {"type": "number"}, {"type": "number"}],
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "read": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["region_id", "region", "status", "blocks", "geometry_scope", "cap_reached", "elapsed_seconds"],
+      "properties": {
+        "region_id": {"type": "string", "minLength": 1},
+        "region": {"$ref": "#/$defs/region"},
+        "status": {"enum": ["ok", "empty", "error"]},
+        "blocks": {"type": "array", "maxItems": 8, "items": {"type": "object", "additionalProperties": false, "required": ["text_raw"], "properties": {"text_raw": {"type": "string", "minLength": 1}}}},
+        "geometry_scope": {"enum": ["", "whole_crop_synthetic_prompt_box"]},
+        "cap_reached": {"type": ["boolean", "null"]},
+        "elapsed_seconds": {"type": "number", "minimum": 0}
+      }
+    }
+  }
+}

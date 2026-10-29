@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "passport-ocr-observations/v2",
+  "title": "Private passport OCR observations v2",
+  "description": "Internal Python-to-Go handoff with optional independent MRZ OCR passes. Coordinates are in EXIF-normalized original-image pixels. This is not the public API response.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "image",
+    "document",
+    "passes",
+    "lines"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "passport-ocr-observations/v2"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "width",
+        "height",
+        "sha256",
+        "coordinate_frame"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "coordinate_frame": {
+          "const": "exif_normalized_pixels"
+        }
+      }
+    },
+    "document": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bounds",
+        "method",
+        "quality",
+        "seam_y"
+      ],
+      "properties": {
+        "bounds": {
+          "$ref": "#/$defs/rect"
+        },
+        "method": {
+          "enum": [
+            "contour",
+            "ocr_bbox_envelope",
+            "full_fallback"
+          ]
+        },
+        "quality": {
+          "enum": [
+            "candidate",
+            "fallback"
+          ]
+        },
+        "seam_y": {
+          "oneOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "passes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "kind",
+          "crop",
+          "rotation_degrees",
+          "transform_to_image",
+          "elapsed_seconds",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "kind": {
+            "enum": [
+              "original",
+              "document",
+              "upper_page",
+              "lower_page",
+              "right_margin_cw",
+              "right_margin_ccw",
+              "mrz"
+            ]
+          },
+          "crop": {
+            "$ref": "#/$defs/rect"
+          },
+          "rotation_degrees": {
+            "type": "integer"
+          },
+          "transform_to_image": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": {
+              "type": "array",
+              "minItems": 3,
+              "maxItems": 3,
+              "items": {
+                "type": "number"
+              }
+            }
+          },
+          "elapsed_seconds": {
+            "type": "number",
+            "minimum": 0
+          },
+          "status": {
+            "enum": [
+              "ok",
+              "error"
+            ]
+          },
+          "reader": {
+            "enum": [
+              "rapidocr",
+              "tesseract-eng"
+            ]
+          },
+          "issue_code": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    "lines": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "pass_id",
+          "text_raw",
+          "score",
+          "quad"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "pass_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "text_raw": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "quad": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {
+              "type": "array",
+              "minItems": 2,
+              "maxItems": 2,
+              "items": {
+                "type": "number"
+              }
+            }
+          }
+        }
+      }
+    },
+    "runtime": {
+      "type": "object",
+      "description": "Private nested runtime metadata such as versions, model hashes and active provider sessions."
+    }
+  },
+  "$defs": {
+    "rect": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "number"
+      }
+    }
+  }
+}

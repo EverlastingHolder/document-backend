@@ -1,0 +1,234 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "passport-template-evidence/v1",
+  "title": "Private anchor-refined template proposals; manual review required",
+  "description": "Experimental OCR-to-Go sidecar, bound to the registered derived raster. Not a public API. Runtime semantic/image/anchor checks in Go are mandatory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "template_id",
+    "image",
+    "anchors",
+    "regions"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "passport-template-evidence/v1"
+    },
+    "template_id": {
+      "const": "ru-internal-spread-anchored/v1"
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "width",
+        "height",
+        "sha256",
+        "coordinate_frame"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "coordinate_frame": {
+          "const": "exif_normalized_pixels"
+        }
+      }
+    },
+    "anchors": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "issue_date",
+        "birth_date",
+        "surname",
+        "given_name",
+        "patronymic"
+      ],
+      "properties": {
+        "issue_date": {
+          "type": "string",
+          "minLength": 1
+        },
+        "birth_date": {
+          "type": "string",
+          "minLength": 1
+        },
+        "surname": {
+          "type": "string",
+          "minLength": 1
+        },
+        "given_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "patronymic": {
+          "type": "string",
+          "minLength": 1
+        },
+        "department_code": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "regions": {
+      "type": "array",
+      "maxItems": 6,
+      "items": {
+        "$ref": "#/$defs/region"
+      }
+    }
+  },
+  "$defs": {
+    "rect": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "number"
+      }
+    },
+    "record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "text_raw",
+        "score",
+        "box",
+        "geometry_scope"
+      ],
+      "properties": {
+        "text_raw": {
+          "type": "string",
+          "minLength": 1
+        },
+        "score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "box": {
+          "$ref": "#/$defs/rect"
+        },
+        "geometry_scope": {
+          "enum": [
+            "entire_crop",
+            "detector_box",
+            "row_crop"
+          ]
+        },
+        "reader_mode": {
+          "enum": [
+            "rec_only",
+            "det_rec"
+          ]
+        }
+      }
+    },
+    "region": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "field_id",
+        "crop",
+        "mode",
+        "anchor_ids",
+        "reader",
+        "reader_mode",
+        "reader_model_sha256",
+        "status",
+        "elapsed_seconds",
+        "records"
+      ],
+      "properties": {
+        "field_id": {
+          "enum": [
+            "surname",
+            "given_name",
+            "patronymic",
+            "gender",
+            "birth_place",
+            "issuer"
+          ]
+        },
+        "crop": {
+          "$ref": "#/$defs/rect"
+        },
+        "mode": {
+          "enum": [
+            "rec_only",
+            "det_rec"
+          ]
+        },
+        "anchor_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "reader": {
+          "const": "rapidocr"
+        },
+        "reader_mode": {
+          "enum": [
+            "rec_only",
+            "det_rec"
+          ]
+        },
+        "reader_model_sha256": {
+          "type": "string",
+          "pattern": "^[a-fA-F0-9]{64}$"
+        },
+        "status": {
+          "enum": [
+            "ok",
+            "empty",
+            "error"
+          ]
+        },
+        "elapsed_seconds": {
+          "type": "number",
+          "minimum": 0
+        },
+        "records": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/record"
+          }
+        },
+        "alternatives": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "items": {
+              "$ref": "#/$defs/record"
+            }
+          }
+        }
+      }
+    }
+  }
+}

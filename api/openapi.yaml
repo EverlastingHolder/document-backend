@@ -1,0 +1,554 @@
+openapi: 3.0.3
+info:
+  title: Passport Recognition API
+  version: 0.4.0
+  description: >-
+    Selected public contract for OCR-assisted recognition of a Russian internal
+    passport spread. The Go response mapper, HTTP handler library and internal
+    server composition are implemented. The composition requires explicit
+    runtime limits, a nonempty caller-supplied client CIDR allowlist, an explicit
+    numeric local bind address and an injected recognizer. It checks the direct
+    TCP peer address and does not trust forwarding headers. No runnable command,
+    production recognizer wiring or deployment is provided. The handler
+    validates multipart structure, declared media type and configured size
+    limits; it does not decode image bytes. Recognition output is unconfirmed
+    and requires human review. Identity authentication, TLS, Internet proxying
+    and numeric production limits are not implemented or selected. The handler
+    also uses not_found and method_not_allowed router fallbacks outside the POST
+    operation; these do not define additional endpoints.
+servers:
+  - url: /
+    description: >-
+      Relative server URL; the caller supplies a numeric local bind address,
+      port and explicit client CIDRs. No deployment endpoint or defaults are set.
+paths:
+  /v1/passport/recognize:
+    post:
+      operationId: recognizePassport
+      summary: Recognize a passport spread image
+      description: >-
+        Accepts one image of the full passport spread after client-side preview,
+        crop, and rotation. A successful response means processing completed,
+        not that extracted values are correct. The client must present every
+        field for human review. No raw OCR lines, internal candidates, evidence,
+        context, MRZ diagnostics, or calibrated confidence scores are returned.
+        The server composition is configured for direct local-network access;
+        it matches the TCP peer address against caller-supplied CIDRs and ignores
+        X-Forwarded-For and X-Real-IP.
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: false
+          description: >-
+            One optional UUID. A single valid value is echoed in every written
+            response. A malformed or repeated value produces 400 invalid_request;
+            the response uses a newly generated UUID and never reflects the input.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: >-
+                    Exactly one file part named file containing the full passport
+                    spread. No other form parts are accepted. The declared
+                    Content-Type must be image/jpeg, image/png or image/webp;
+                    the HTTP handler does not decode the image.
+            encoding:
+              file:
+                contentType: image/jpeg, image/png, image/webp
+      responses:
+        '200':
+          description: >-
+            Processing completed; field values remain unconfirmed. Completion
+            may include no non-null field values; in that case the response
+            includes the no_fields_recognized warning. The implemented Go mapper
+            applies this condition after filtering invalid values; the response
+            schema cannot enforce the cross-field condition by itself.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecognitionResponse'
+              examples:
+                allFieldsRecognized:
+                  $ref: '#/components/examples/allFieldsRecognized'
+                partialResult:
+                  $ref: '#/components/examples/partialResult'
+                noFieldsRecognized:
+                  $ref: '#/components/examples/noFieldsRecognized'
+        '400':
+          description: >-
+            invalid_request: malformed multipart, missing/empty/duplicate file,
+            unexpected form part, malformed/duplicate X-Request-ID, or invalid
+            request structure. For invalid request IDs, a new UUID is returned.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: >-
+            access_denied: for a valid route, method, request ID and active
+            request context, the direct TCP peer address is outside the
+            caller-supplied client CIDR allowlist. This check happens before the
+            upload body is read or a concurrency slot is acquired. Forwarded
+            address headers are ignored; this is network filtering, not identity
+            authentication.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: >-
+            upload_too_large: file or bounded multipart body exceeds the
+            configured upload limit. The caller must supply a positive limit;
+            no numeric production default is selected.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: >-
+            unsupported_media_type — missing or unsupported declared file media type.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: >-
+            image_unprocessable: the injected recognizer reports that the image
+            cannot be decoded or processed. The handler does not decode images;
+            lack of recognized fields alone never selects this status.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                imageUnprocessable:
+                  $ref: '#/components/examples/imageUnprocessable'
+        '429':
+          description: >-
+            concurrency_limit_reached: configured concurrent upload/recognition
+            capacity is occupied. This handler limit is concurrency-only; no
+            rate/QPS policy is selected.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: >-
+            processing_failed — unexpected recognizer or invalid internal-result failure.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: >-
+            ocr_unavailable — the injected recognizer reports that it is unavailable.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: >-
+            processing_timeout: recognizer deadline exceeded. The timeout is a
+            required caller configuration value; no numeric production default
+            is selected.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+components:
+  headers:
+    RequestID:
+      description: >-
+        Correlation UUID matching request_id in the JSON response. Valid client
+        IDs are echoed; absent IDs are generated; invalid/duplicate IDs receive
+        a newly generated UUID in the 400 response.
+      schema:
+        type: string
+        format: uuid
+  schemas:
+    RecognitionResponse:
+      type: object
+      additionalProperties: false
+      required: [request_id, status, review_required, pipeline_version, fields, warnings]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Echoed client request ID, or server-generated UUID.
+        status:
+          type: string
+          enum: [completed]
+          description: Processing state only; does not assert recognition correctness.
+        review_required:
+          type: boolean
+          enum: [true]
+          description: Every returned field must be checked by a person.
+        pipeline_version:
+          type: string
+          minLength: 1
+          description: Non-empty identifier for the extraction pipeline and model set.
+        fields:
+          type: object
+          additionalProperties: false
+          required:
+            - surname
+            - given_name
+            - patronymic
+            - gender
+            - birth_date
+            - birth_place
+            - series
+            - number
+            - issue_date
+            - issuer
+            - department_code
+          properties:
+            surname:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - $ref: '#/components/schemas/NameFieldResult'
+              description: Name string; do not rewrite by dictionary or guess.
+            given_name:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - $ref: '#/components/schemas/NameFieldResult'
+              description: Name string; do not rewrite by dictionary or guess.
+            patronymic:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - $ref: '#/components/schemas/NameFieldResult'
+              description: >-
+                Always-present key. Null is valid and does not establish whether
+                the source document contains a patronymic.
+            gender:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - type: object
+                  properties:
+                    value:
+                      type: string
+                      nullable: true
+                      enum: [M, F, null]
+              description: Canonical non-null value is M or F.
+            birth_date:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - $ref: '#/components/schemas/DateFieldResult'
+              description: Calendar-valid date in YYYY-MM-DD form.
+            birth_place:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - $ref: '#/components/schemas/NonEmptyStringFieldResult'
+              description: Non-empty string without dictionary-based guessing.
+            series:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - type: object
+                  properties:
+                    value:
+                      type: string
+                      nullable: true
+                      pattern: '^[0-9]{4}$'
+              description: Four-digit string; leading zeroes are preserved.
+            number:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - type: object
+                  properties:
+                    value:
+                      type: string
+                      nullable: true
+                      pattern: '^[0-9]{6}$'
+              description: Six-digit string; leading zeroes are preserved.
+            issue_date:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - $ref: '#/components/schemas/DateFieldResult'
+              description: Calendar-valid date in YYYY-MM-DD form.
+            issuer:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - $ref: '#/components/schemas/NonEmptyStringFieldResult'
+              description: Non-empty string without dictionary-based guessing.
+            department_code:
+              allOf:
+                - $ref: '#/components/schemas/FieldResult'
+                - type: object
+                  properties:
+                    value:
+                      type: string
+                      nullable: true
+                      pattern: '^[0-9]{3}-[0-9]{3}$'
+              description: Six digits in the form 000-000.
+        warnings:
+          type: array
+          description: Always-present non-field-specific warnings; use [] when none apply.
+          items:
+            $ref: '#/components/schemas/RecognitionWarning'
+    FieldResult:
+      type: object
+      additionalProperties: false
+      required: [value, state, issues]
+      properties:
+        value:
+          type: string
+          nullable: true
+          minLength: 1
+          description: >-
+            Non-empty canonical candidate or null. Do not dictionary-rewrite
+            uncertain names. Serial identifiers remain strings.
+        state:
+          type: string
+          enum: [recognized, uncertain, missing]
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/FieldIssue'
+      oneOf:
+        - required: [value, state, issues]
+          properties:
+            value:
+              type: string
+              minLength: 1
+              nullable: false
+            state:
+              type: string
+              enum: [recognized]
+            issues:
+              type: array
+              maxItems: 0
+        - required: [value, state, issues]
+          properties:
+            value:
+              type: string
+              minLength: 1
+              nullable: true
+            state:
+              type: string
+              enum: [uncertain]
+            issues:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/FieldIssue'
+        - required: [value, state, issues]
+          properties:
+            value:
+              type: string
+              nullable: true
+              enum: [null]
+            state:
+              type: string
+              enum: [missing]
+            issues:
+              type: array
+              items:
+                $ref: '#/components/schemas/FieldIssue'
+    FieldIssue:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum:
+            - conflicting_field_candidates
+            - manual_review_required
+            - date_invalid_calendar_or_format
+          description: Initial public field-issue code catalog.
+        message:
+          type: string
+          minLength: 1
+          description: Short safe display text without PII; clients must not parse it.
+    RecognitionWarning:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          enum: [no_fields_recognized]
+          description: Initial public recognition-warning code catalog.
+        message:
+          type: string
+          minLength: 1
+          description: Short safe display text without PII; clients must not parse it.
+    NonEmptyStringFieldResult:
+      type: object
+      properties:
+        value:
+          type: string
+          nullable: true
+          minLength: 1
+    NameFieldResult:
+      allOf:
+        - $ref: '#/components/schemas/NonEmptyStringFieldResult'
+    DateFieldResult:
+      type: object
+      properties:
+        value:
+          type: string
+          nullable: true
+          format: date
+          pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+          description: Calendar date validation is also required at runtime.
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [request_id, code, message]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          enum:
+            - invalid_request
+            - access_denied
+            - upload_too_large
+            - unsupported_media_type
+            - image_unprocessable
+            - concurrency_limit_reached
+            - processing_failed
+            - ocr_unavailable
+            - processing_timeout
+            - not_found
+            - method_not_allowed
+          description: >-
+            Machine-readable error code. not_found and method_not_allowed are
+            handler/router fallbacks outside the POST operation and do not imply
+            additional endpoints.
+        message:
+          type: string
+          minLength: 1
+          description: Safe diagnostic message without uploaded content or PII.
+  examples:
+    allFieldsRecognized:
+      summary: All fields have a candidate
+      description: Synthetic example; pipeline_version is not a deployed version.
+      value:
+        request_id: 94b86c5c-2520-4c0f-b91e-6d4a948fc88a
+        status: completed
+        review_required: true
+        pipeline_version: synthetic-draft-1
+        fields:
+          surname: {value: ИВАНОВ, state: recognized, issues: []}
+          given_name: {value: АЛЕКСЕЙ, state: recognized, issues: []}
+          patronymic: {value: ПЕТРОВИЧ, state: recognized, issues: []}
+          gender: {value: M, state: recognized, issues: []}
+          birth_date: {value: '1990-04-12', state: recognized, issues: []}
+          birth_place: {value: ГОРОД ПРИМЕР, state: recognized, issues: []}
+          series: {value: '0012', state: recognized, issues: []}
+          number: {value: '000345', state: recognized, issues: []}
+          issue_date: {value: '2010-06-18', state: recognized, issues: []}
+          issuer: {value: ОТДЕЛ ПРИМЕРА, state: recognized, issues: []}
+          department_code: {value: '123-456', state: recognized, issues: []}
+        warnings: []
+    partialResult:
+      summary: Partial result with missing and uncertain fields
+      description: Synthetic example; pipeline_version is not a deployed version.
+      value:
+        request_id: 1a2ec415-66c5-4af1-ae13-9eb60e0fd827
+        status: completed
+        review_required: true
+        pipeline_version: synthetic-draft-1
+        fields:
+          surname: {value: СИДОРОВ, state: recognized, issues: []}
+          given_name: {value: МИХАИЛ, state: recognized, issues: []}
+          patronymic: {value: null, state: missing, issues: []}
+          gender:
+            value: M
+            state: uncertain
+            issues:
+              - {code: manual_review_required, message: Проверьте распознанный пол.}
+          birth_date:
+            value: null
+            state: uncertain
+            issues:
+              - {code: conflicting_field_candidates, message: Есть несколько вариантов даты рождения.}
+          birth_place: {value: null, state: missing, issues: []}
+          series: {value: '0042', state: recognized, issues: []}
+          number: {value: '000781', state: recognized, issues: []}
+          issue_date:
+            value: null
+            state: missing
+            issues:
+              - {code: date_invalid_calendar_or_format, message: Не удалось получить допустимую дату выдачи.}
+          issuer:
+            value: ОТДЕЛЬНЫЙ УЧАСТОК ПРИМЕРА
+            state: uncertain
+            issues:
+              - {code: manual_review_required, message: 'Проверьте, кем выдан паспорт.'}
+          department_code: {value: '456-789', state: recognized, issues: []}
+        warnings: []
+    noFieldsRecognized:
+      summary: Processing completed without any non-null field values
+      description: Synthetic example; this remains a successful 200 response.
+      value:
+        request_id: 8d83e8ea-aefc-4f01-b0b6-7dc8579bbef3
+        status: completed
+        review_required: true
+        pipeline_version: synthetic-draft-1
+        fields:
+          surname: {value: null, state: missing, issues: []}
+          given_name: {value: null, state: missing, issues: []}
+          patronymic: {value: null, state: missing, issues: []}
+          gender: {value: null, state: missing, issues: []}
+          birth_date: {value: null, state: missing, issues: []}
+          birth_place: {value: null, state: missing, issues: []}
+          series: {value: null, state: missing, issues: []}
+          number: {value: null, state: missing, issues: []}
+          issue_date: {value: null, state: missing, issues: []}
+          issuer: {value: null, state: missing, issues: []}
+          department_code: {value: null, state: missing, issues: []}
+        warnings:
+          - code: no_fields_recognized
+            message: Не удалось распознать поля. Попробуйте сделать новый снимок.
+    imageUnprocessable:
+      summary: Image could not be decoded or processed
+      description: Synthetic example; image_unprocessable is the selected public 422 code.
+      value:
+        request_id: 0bc5454f-4a34-4477-858d-49dd471cd3d4
+        code: image_unprocessable
+        message: Изображение не удалось обработать. Проверьте файл и попробуйте ещё раз.

@@ -1,0 +1,46 @@
+# Go build and test artifacts
+/bin/
+/build/
+*.test
+*.out
+coverage.*
+
+# Python environments, caches, and generated artifacts
+__pycache__/
+*.py[cod]
+.venv/
+.venv-vl/
+venv/
+.local/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OCR model weights and downloaded datasets (never commit these)
+*.pdparams
+*.pdiparams
+*.onnx
+*.safetensors
+/models/
+/datasets/
+/ocr/experiments/results/
+/ocr/experiments/fixtures/
+/ocr/experiments/models/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+
+# The user's global ignore hides these names; keep canonical project guidance
+!/AGENTS.md
+!/docs/
+!/docs/**
