@@ -1,38 +1,66 @@
 package passport
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+	"time"
+)
 
-var visualNameRunes = map[rune]rune{
-	'A': 'А', 'B': 'В', 'C': 'С', 'E': 'Е', 'H': 'Н', 'K': 'К', 'M': 'М', 'O': 'О', 'P': 'Р', 'T': 'Т', 'X': 'Х', 'Y': 'У',
+var (
+	dateDot   = regexp.MustCompile(`^(\d{2})\.(\d{2})\.(\d{4})$`)
+	dateDash  = regexp.MustCompile(`^(\d{2})-(\d{2})-(\d{4})$`)
+	deptDash  = regexp.MustCompile(`^\d{3}-\d{3}$`)
+	digitRun6 = regexp.MustCompile(`^\d{6}$`)
+)
+
+func parseDate(raw string) (string, bool) {
+	value := strings.TrimSpace(raw)
+	for _, pattern := range []*regexp.Regexp{dateDot, dateDash} {
+		matches := pattern.FindStringSubmatch(value)
+		if len(matches) != 4 {
+			continue
+		}
+		parsed, err := time.Parse("02-01-2006", matches[1]+"-"+matches[2]+"-"+matches[3])
+		if err != nil {
+			return "", false
+		}
+		return parsed.Format("2006-01-02"), true
+	}
+	if parsed, err := time.Parse("2006-01-02", value); err == nil {
+		return parsed.Format("2006-01-02"), true
+	}
+	return "", false
 }
 
-func normalizeName(raw string, enabled bool) (string, []string, bool) {
-	if !enabled {
-		return raw, nil, containsLatin(raw)
+func canonicalGender(value string) (string, bool) {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "М", "МУЖ", "МУЖСКОЙ", "M":
+		return "M", true
+	case "Ж", "ЖЕН", "ЖЕНСКИЙ", "F":
+		return "F", true
+	default:
+		return "", false
 	}
-	var out strings.Builder
-	rules := make([]string, 0)
-	seen := make(map[rune]bool)
-	for _, r := range raw {
-		mapped, ok := visualNameRunes[r]
-		if ok {
-			r = mapped
-			if !seen[r] {
-				rules = append(rules, "visual_latin_lookalike_to_cyrillic")
-				seen[r] = true
-			}
-		}
-		out.WriteRune(r)
-	}
-	value := out.String()
-	return value, rules, len(rules) > 0 || containsLatin(value)
 }
 
-func containsLatin(s string) bool {
-	for _, r := range s {
-		if (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') {
-			return true
+func canonicalDepartment(value string) string {
+	value = strings.TrimSpace(value)
+	if deptDash.MatchString(value) {
+		return value
+	}
+	var digits strings.Builder
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			digits.WriteRune(r)
+		case r == ' ' || r == '\t' || r == '-' || r == '‐' || r == '‑':
+		default:
+			return value
 		}
 	}
-	return false
+	canonical := digits.String()
+	if digitRun6.MatchString(canonical) {
+		return canonical[:3] + "-" + canonical[3:]
+	}
+	return value
 }

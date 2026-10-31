@@ -1,5 +1,7 @@
 # Автоматические ROI и PaddleOCR-VL
 
+> Исторический эксперимент. Production route, Go evaluator и API worker удалены; команды ниже больше не запускаются из текущего backend.
+
 **Статус на 2026-10-29: planner v5d и парное after-v3 сравнение завершены; сравнение прошло evaluation guards.** After-v1 sidecars имели ошибку сериализации reader и не использовались в scoring; after-v2 reader прошёл проверку, но сравнение after-v2 относится к предыдущей версии ROI planner.
 
 ## Поток обработки

@@ -1,5 +1,7 @@
 # Нативный OCR smoke
 
+> Архивная исследовательская документация. Go evaluator и production ROI/layout/extraction код удалены; runner-команды ниже, зависящие от `cmd/ocr-eval`, больше не запускаются из текущего backend. Сохранённые результаты остаются историческими и не описывают текущий RussianDocsOCR provider.
+
 ## Новое: шаблонные поля на зарегистрированных страницах
 
 `template_field_pipeline.build_template_passport` — внутренний reusable маршрут для нового фото: физическая регистрация, OCR страниц, опорные строки, field crops. Он не принимает эталон. Результат содержит observations, lineage и необязательный `template_evidence_path`; этот sidecar передаётся текущему Go CLI через `--template-evidence`, вместе с `--passes=all --normalize-names=true --mrz-policy=augment`. Неподтверждённая регистрация отключает шаблон и сохраняет прежний OCR fallback.

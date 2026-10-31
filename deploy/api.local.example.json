@@ -1,0 +1,36 @@
+{
+  "listen_address": "127.0.0.1:8080",
+  "allowed_client_networks": [
+    "127.0.0.0/8"
+  ],
+  "max_upload_bytes": 8388608,
+  "max_concurrent": 1,
+  "pipeline_version": "russiandocs-local-example-v1",
+  "ocr_timeout": "360s",
+  "read_header_timeout": "5s",
+  "read_timeout": "30s",
+  "write_timeout": "420s",
+  "idle_timeout": "30s",
+  "shutdown_timeout": "15s",
+  "max_header_bytes": 16384,
+  "process_stop_grace": "3s",
+  "max_output_bytes": 2097152,
+  "max_image_pixels": 40000000,
+  "logging": {
+    "path": "../.local/ocr-api/logs/api.jsonl",
+    "level": "info",
+    "max_size_bytes": 5242880,
+    "max_backups": 3
+  },
+  "metrics": {
+    "state_path": "../.local/ocr-api/metrics/state.json"
+  },
+  "ocr": {
+    "russian_docs_python": "../.local/russiandocs-venv/bin/python",
+    "russian_docs_worker": "../ocr/runtime/russiandocs_worker.py",
+    "russian_docs_repo": "../.local/RussianDocsOCR",
+    "russian_docs_models_root": "../.local/RussianDocsOCR/document_processing/models",
+    "russian_docs_startup_timeout": "90s",
+    "work_root": "../.local/ocr-api/jobs"
+  }
+}

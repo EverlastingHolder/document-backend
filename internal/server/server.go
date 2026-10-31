@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
@@ -15,6 +16,8 @@ import (
 	"time"
 
 	"passport-backend/internal/httpapi"
+	"passport-backend/internal/metrics"
+	"passport-backend/internal/telemetry"
 )
 
 const maxHTTPHeaderBytes = int64(^uint64(0)>>1) - 4096
@@ -23,6 +26,7 @@ const maxHTTPHeaderBytes = int64(^uint64(0)>>1) - 4096
 // deployment defaults are applied by this package.
 type Config struct {
 	Address           string
+	Logging           telemetry.Config
 	HTTP              httpapi.Config
 	ReadHeaderTimeout time.Duration
 	ReadTimeout       time.Duration
@@ -30,6 +34,8 @@ type Config struct {
 	IdleTimeout       time.Duration
 	ShutdownTimeout   time.Duration
 	MaxHeaderBytes    int
+	Logger            *slog.Logger
+	Metrics           *metrics.Store
 }
 
 // Server is a single-use composition of the HTTP API and its listener.
@@ -37,6 +43,7 @@ type Server struct {
 	config Config
 	http   *http.Server
 	used   atomic.Bool
+	logger *slog.Logger
 }
 
 // New validates the complete runtime configuration and builds the existing
@@ -55,17 +62,27 @@ func New(config Config, recognizer httpapi.Recognizer) (*Server, error) {
 	for i, prefix := range config.HTTP.AllowedClientNetworks {
 		config.HTTP.AllowedClientNetworks[i] = prefix.Masked()
 	}
+	if config.Metrics != nil {
+		if config.HTTP.Metrics != nil && config.HTTP.Metrics != config.Metrics {
+			return nil, errors.New("HTTP and server metrics stores must match")
+		}
+		config.HTTP.Metrics = config.Metrics
+	}
+	logger := telemetry.LoggerOrDiscard(config.Logger).With("component", "server")
+	if config.HTTP.Logger == nil {
+		config.HTTP.Logger = logger.With("component", "httpapi")
+	}
 	handler, err := httpapi.NewHandler(config.HTTP, recognizer)
 	if err != nil {
 		return nil, fmt.Errorf("invalid HTTP API configuration: %w", err)
 	}
 	return &Server{
 		config: config,
+		logger: logger,
 		http: &http.Server{
 			Handler: handler,
-			// Suppress net/http's unstructured diagnostics, which can include
-			// a recognizer panic value. Safe operational telemetry is not
-			// configured by this composition.
+			// Keep net/http's unstructured diagnostics disabled; request panic
+			// telemetry is emitted by the handler without panic values.
 			ErrorLog:          log.New(io.Discard, "", 0),
 			ReadHeaderTimeout: config.ReadHeaderTimeout,
 			ReadTimeout:       config.ReadTimeout,
@@ -93,7 +110,8 @@ func (s *Server) Run(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		return fmt.Errorf("listen on %q: %w", s.config.Address, err)
+		s.logServiceFailure("startup_failed")
+		return fmt.Errorf("listen failed: %w", err)
 	}
 	if ctx.Err() != nil {
 		return listener.Close()
@@ -118,6 +136,7 @@ func (s *Server) Serve(ctx context.Context, listener net.Listener) error {
 		return listener.Close()
 	}
 	if !validTCPListenerAddress(listener) {
+		s.logServiceFailure("startup_failed")
 		return errors.Join(errors.New("listener address must be a specific local TCP address"), listener.Close())
 	}
 	return s.serveClaimed(ctx, listener)
@@ -188,6 +207,7 @@ func isLocalAddress(ip netip.Addr) bool {
 }
 
 func (s *Server) serveClaimed(ctx context.Context, listener net.Listener) error {
+	s.logger.Info("service.started", "event", "service.started")
 	serveDone := make(chan error, 1)
 	go func() {
 		serveDone <- s.http.Serve(listener)
@@ -195,16 +215,22 @@ func (s *Server) serveClaimed(ctx context.Context, listener net.Listener) error 
 
 	select {
 	case serveErr := <-serveDone:
-		return s.finishServe(serveErr)
+		err := s.finishServe(serveErr)
+		if err == nil {
+			s.logger.Info("service.stopped", "event", "service.stopped")
+		}
+		return err
 	case <-ctx.Done():
 	}
 
+	s.logger.Info("service.stopping", "event", "service.stopping")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), s.config.ShutdownTimeout)
 	shutdownErr := s.http.Shutdown(shutdownCtx)
 	cancel()
 	if shutdownErr != nil {
 		closeErr := s.http.Close()
 		serveErr := <-serveDone
+		s.logServiceFailure("shutdown_failed")
 		return errors.Join(
 			fmt.Errorf("graceful shutdown: %w", shutdownErr),
 			wrapCloseError(closeErr),
@@ -212,7 +238,11 @@ func (s *Server) serveClaimed(ctx context.Context, listener net.Listener) error 
 		)
 	}
 	serveErr := <-serveDone
-	return s.finishServe(serveErr)
+	if err := s.finishServe(serveErr); err != nil {
+		return err
+	}
+	s.logger.Info("service.stopped", "event", "service.stopped")
+	return nil
 }
 
 func (s *Server) finishServe(serveErr error) error {
@@ -220,7 +250,12 @@ func (s *Server) finishServe(serveErr error) error {
 		return nil
 	}
 	closeErr := s.http.Close()
+	s.logServiceFailure("shutdown_failed")
 	return errors.Join(fmt.Errorf("serve HTTP server: %w", serveErr), wrapCloseError(closeErr))
+}
+
+func (s *Server) logServiceFailure(code string) {
+	s.logger.Error("service.failed", "event", "service.failed", "error_code", code)
 }
 
 func unexpectedServeError(err error) error {

@@ -1,21 +1,23 @@
 openapi: 3.0.3
 info:
   title: Passport Recognition API
-  version: 0.4.0
+  version: 0.5.0
   description: >-
     Selected public contract for OCR-assisted recognition of a Russian internal
-    passport spread. The Go response mapper, HTTP handler library and internal
-    server composition are implemented. The composition requires explicit
-    runtime limits, a nonempty caller-supplied client CIDR allowlist, an explicit
-    numeric local bind address and an injected recognizer. It checks the direct
-    TCP peer address and does not trust forwarding headers. No runnable command,
-    production recognizer wiring or deployment is provided. The handler
-    validates multipart structure, declared media type and configured size
-    limits; it does not decode image bytes. Recognition output is unconfirmed
-    and requires human review. Identity authentication, TLS, Internet proxying
-    and numeric production limits are not implemented or selected. The handler
-    also uses not_found and method_not_allowed router fallbacks outside the POST
-    operation; these do not define additional endpoints.
+    passport spread. The Go response mapper, HTTP handler, local server command
+    and private recognizer wiring are implemented. The command requires explicit
+    runtime limits, a nonempty caller-supplied client CIDR allowlist and a
+    numeric local bind address. It checks the direct TCP peer and does not trust
+    forwarding headers. The private recognizer invokes one RussianDocsOCR
+    worker and maps its structured fields into the canonical Go result; Python has no
+    public ingress. The handler validates multipart structure, declared media
+    type and configured size limits; the recognizer separately decodes image
+    bytes and enforces a pixel cap. Recognition output is unconfirmed and
+    requires human review. Identity authentication, TLS, Internet proxying and
+    universal production limits are not implemented or selected. The handler
+    exposes a cumulative privacy-filtered statistics snapshot at GET /v1/stats.
+    It uses the same direct-peer CIDR allowlist. Statistics are aggregate
+    counters retained across restarts, not request history or a time series.
 servers:
   - url: /
     description: >-
@@ -139,9 +141,11 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
           description: >-
-            image_unprocessable: the injected recognizer reports that the image
-            cannot be decoded or processed. The handler does not decode images;
-            lack of recognized fields alone never selects this status.
+            image_unprocessable: the recognizer reports that the uploaded bytes
+            cannot be decoded as the declared supported image type or processed
+            within its image limits. The handler itself only validates multipart
+            structure and declared media type; lack of recognized fields alone
+            never selects this status.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -176,7 +180,10 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '503':
           description: >-
-            ocr_unavailable — the injected recognizer reports that it is unavailable.
+            ocr_unavailable: the private provider or configured local runtime is
+            unavailable, including a missing runtime asset, unsupported provider
+            platform or worker launch failure. Dynamic child diagnostics and OCR
+            data are not included in this public response.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -196,6 +203,87 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /v1/stats:
+    get:
+      operationId: getStatistics
+      summary: Read cumulative service statistics
+      description: >-
+        Returns a bounded cumulative aggregate snapshot from persistent local
+        state. Access uses the same direct TCP peer CIDR allowlist as recognition.
+        The snapshot contains no request IDs, image data, OCR text, or per-request
+        records. Counters are cumulative since the first state file was created;
+        this endpoint does not expose a time series or permit rate calculations
+        from a single response. Histogram buckets are cumulative, and mean
+        duration can be derived as sum_ms/count when count is nonzero. No p95 is
+        reported because retained aggregates cannot yield an exact percentile.
+      parameters:
+        - name: X-Request-ID
+          in: header
+          required: false
+          description: >-
+            One optional UUID. A single valid value is echoed in every written
+            response. A malformed or repeated value produces 400 invalid_request;
+            the response uses a newly generated UUID and never reflects the input.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Cumulative aggregate statistics snapshot.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatisticsResponse'
+        '400':
+          description: >-
+            invalid_request: malformed or duplicate X-Request-ID.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: >-
+            access_denied: the direct TCP peer is outside the configured client
+            CIDR allowlist. Forwarded address headers are ignored.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '405':
+          description: method_not_allowed; only GET is supported.
+          headers:
+            Allow:
+              schema:
+                type: string
+                enum: [GET]
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: >-
+            statistics_unavailable: statistics are not available in this handler
+            composition. State read and persistence failures during normal
+            operation are reported through the snapshot persistence health field;
+            this response does not expose filesystem details.
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   headers:
     RequestID:
@@ -207,6 +295,133 @@ components:
         type: string
         format: uuid
   schemas:
+    StatisticsResponse:
+      type: object
+      additionalProperties: false
+      required: [request_id, statistics]
+      properties:
+        request_id:
+          type: string
+          format: uuid
+        statistics:
+          $ref: '#/components/schemas/StatisticsSnapshot'
+    StatisticsSnapshot:
+      type: object
+      additionalProperties: false
+      required: [schema_version, pipeline_version, since, updated_at, persistence, http, ocr, stages]
+      properties:
+        schema_version:
+          type: string
+          enum: [passport-metrics/v1]
+        pipeline_version:
+          type: string
+          minLength: 1
+        since:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        persistence:
+          type: object
+          additionalProperties: false
+          required: [healthy, error_code]
+          properties:
+            healthy:
+              type: boolean
+            error_code:
+              type: string
+              enum: ['', metrics_write_failed]
+        http:
+          type: object
+          additionalProperties: false
+          required: [total, errors, by_status, duration, response_bytes_total]
+          properties:
+            total: {type: integer, format: int64, minimum: 0}
+            errors: {type: integer, format: int64, minimum: 0}
+            by_status:
+              type: object
+              additionalProperties: false
+              required: ['0', '200', '400', '403', '404', '405', '413', '415', '422', '429', '500', '503', '504']
+              properties:
+                '0': {type: integer, format: int64, minimum: 0}
+                '200': {type: integer, format: int64, minimum: 0}
+                '400': {type: integer, format: int64, minimum: 0}
+                '403': {type: integer, format: int64, minimum: 0}
+                '404': {type: integer, format: int64, minimum: 0}
+                '405': {type: integer, format: int64, minimum: 0}
+                '413': {type: integer, format: int64, minimum: 0}
+                '415': {type: integer, format: int64, minimum: 0}
+                '422': {type: integer, format: int64, minimum: 0}
+                '429': {type: integer, format: int64, minimum: 0}
+                '500': {type: integer, format: int64, minimum: 0}
+                '503': {type: integer, format: int64, minimum: 0}
+                '504': {type: integer, format: int64, minimum: 0}
+            duration:
+              $ref: '#/components/schemas/DurationHistogram'
+            response_bytes_total: {type: integer, format: int64, minimum: 0}
+        ocr:
+          type: object
+          additionalProperties: false
+          required: [total, completed, failed, by_error_code, duration]
+          properties:
+            total: {type: integer, format: int64, minimum: 0}
+            completed: {type: integer, format: int64, minimum: 0}
+            failed: {type: integer, format: int64, minimum: 0}
+            by_error_code:
+              type: object
+              additionalProperties: false
+              required: [image_unprocessable, runtime_unavailable, deadline_exceeded, cancelled, pipeline_failed, processing_failed]
+              properties:
+                image_unprocessable: {type: integer, format: int64, minimum: 0}
+                runtime_unavailable: {type: integer, format: int64, minimum: 0}
+                deadline_exceeded: {type: integer, format: int64, minimum: 0}
+                cancelled: {type: integer, format: int64, minimum: 0}
+                pipeline_failed: {type: integer, format: int64, minimum: 0}
+                processing_failed: {type: integer, format: int64, minimum: 0}
+            duration:
+              $ref: '#/components/schemas/DurationHistogram'
+        stages:
+          type: object
+          additionalProperties: false
+          required: [ocr, baseline, vl, extract]
+          properties:
+            ocr: {$ref: '#/components/schemas/StageStatistics'}
+            baseline: {$ref: '#/components/schemas/StageStatistics'}
+            vl: {$ref: '#/components/schemas/StageStatistics'}
+            extract: {$ref: '#/components/schemas/StageStatistics'}
+    StageStatistics:
+      type: object
+      additionalProperties: false
+      required: [completed, failed, duration]
+      properties:
+        completed: {type: integer, format: int64, minimum: 0}
+        failed: {type: integer, format: int64, minimum: 0}
+        duration:
+          $ref: '#/components/schemas/DurationHistogram'
+    DurationHistogram:
+      type: object
+      additionalProperties: false
+      required: [count, sum_ms, min_ms, max_ms, buckets]
+      properties:
+        count: {type: integer, format: int64, minimum: 0}
+        sum_ms: {type: integer, format: int64, minimum: 0}
+        min_ms: {type: integer, format: int64, minimum: 0}
+        max_ms: {type: integer, format: int64, minimum: 0}
+        buckets:
+          type: array
+          minItems: 16
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            required: [le_ms, count]
+            properties:
+              le_ms:
+                type: integer
+                nullable: true
+                enum: [10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000, 600000, 86400000, null]
+              count: {type: integer, format: int64, minimum: 0}
     RecognitionResponse:
       type: object
       additionalProperties: false

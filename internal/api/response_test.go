@@ -15,15 +15,8 @@ func TestMapExtractionReturnsOnlyPublicEnvelopeAndAllFields(t *testing.T) {
 	input := validExtraction()
 	input.ImageID = "PRIVATE-IMAGE-SENTINEL"
 	input.SchemaVersion = "PRIVATE-SCHEMA-SENTINEL"
-	input.MRZ = &passport.MRZDiagnostics{}
 	field := input.Fields["surname"]
-	field.Raw = "PRIVATE-RAW-SENTINEL"
-	field.Candidates = []passport.Candidate{{
-		Value: "PRIVATE-CANDIDATE-SENTINEL", Raw: "PRIVATE-CANDIDATE-RAW-SENTINEL",
-		Rules: []string{"PRIVATE-RULE-SENTINEL"}, LineIDs: []string{"PRIVATE-LINE-SENTINEL"},
-		PassIDs: []string{"PRIVATE-PASS-SENTINEL"}, Context: "PRIVATE-CONTEXT-SENTINEL",
-	}}
-	field.Evidence = passport.Evidence{LineIDs: []string{"PRIVATE-EVIDENCE-SENTINEL"}, PassIDs: []string{"PRIVATE-EVIDENCE-PASS-SENTINEL"}}
+	field.Candidates = []passport.Candidate{{Value: "PRIVATE-CANDIDATE-SENTINEL"}}
 	input.Fields["surname"] = field
 
 	response, err := MapExtraction(input, testRequestID, "pipeline-v1")
@@ -56,10 +49,7 @@ func TestMapExtractionReturnsOnlyPublicEnvelopeAndAllFields(t *testing.T) {
 		t.Errorf("warnings = %#v, want []", body["warnings"])
 	}
 	for _, sentinel := range []string{
-		"PRIVATE-IMAGE-SENTINEL", "PRIVATE-SCHEMA-SENTINEL", "PRIVATE-RAW-SENTINEL",
-		"PRIVATE-CANDIDATE-SENTINEL", "PRIVATE-CANDIDATE-RAW-SENTINEL", "PRIVATE-RULE-SENTINEL",
-		"PRIVATE-LINE-SENTINEL", "PRIVATE-PASS-SENTINEL", "PRIVATE-CONTEXT-SENTINEL",
-		"PRIVATE-EVIDENCE-SENTINEL", "PRIVATE-EVIDENCE-PASS-SENTINEL",
+		"PRIVATE-IMAGE-SENTINEL", "PRIVATE-SCHEMA-SENTINEL", "PRIVATE-CANDIDATE-SENTINEL",
 	} {
 		if strings.Contains(string(mustJSON(t, response)), sentinel) {
 			t.Errorf("public JSON leaked private sentinel %q", sentinel)
@@ -354,9 +344,9 @@ func validExtraction() passport.Extraction {
 	}
 	fields := make(map[string]passport.FieldResult, 11)
 	for name, value := range values {
-		fields[name] = passport.FieldResult{Value: stringPointer(value), State: "recognized", Candidates: []passport.Candidate{}, Rules: []string{}, Issues: []string{}}
+		fields[name] = passport.FieldResult{Value: stringPointer(value), State: "recognized", Candidates: []passport.Candidate{}, Issues: []string{}}
 	}
-	fields["patronymic"] = passport.FieldResult{State: "missing", Candidates: []passport.Candidate{}, Rules: []string{}, Issues: []string{}}
+	fields["patronymic"] = passport.FieldResult{State: "missing", Candidates: []passport.Candidate{}, Issues: []string{}}
 	return passport.Extraction{SchemaVersion: passport.ExtractionSchema, ImageID: "private-image", ReviewRequired: false, Fields: fields}
 }
 
@@ -381,9 +371,6 @@ func cloneExtraction(input passport.Extraction) passport.Extraction {
 		}
 		if field.Issues != nil {
 			copyField.Issues = append([]string{}, field.Issues...)
-		}
-		if field.Rules != nil {
-			copyField.Rules = append([]string{}, field.Rules...)
 		}
 		if field.Candidates != nil {
 			copyField.Candidates = append([]passport.Candidate{}, field.Candidates...)

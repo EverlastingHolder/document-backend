@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"math"
 	"mime"
 	"mime/multipart"
@@ -17,11 +18,14 @@ import (
 	"time"
 
 	"passport-backend/internal/api"
+	"passport-backend/internal/metrics"
 	"passport-backend/internal/passport"
+	"passport-backend/internal/telemetry"
 )
 
 const (
 	recognizePath         = "/v1/passport/recognize"
+	statsPath             = "/v1/stats"
 	multipartBodyOverhead = int64(64 << 10)
 )
 
@@ -46,6 +50,8 @@ type Config struct {
 	MaxConcurrent         int
 	PipelineVersion       string
 	AllowedClientNetworks []netip.Prefix
+	Logger                *slog.Logger
+	Metrics               *metrics.Store
 }
 
 type errorResponse struct {
@@ -58,6 +64,7 @@ type handler struct {
 	config     Config
 	recognizer Recognizer
 	semaphore  chan struct{}
+	logger     *slog.Logger
 }
 
 // NewHandler constructs the public HTTP handler with explicit operational limits.
@@ -75,19 +82,68 @@ func NewHandler(config Config, recognizer Recognizer) (http.Handler, error) {
 		config:     config,
 		recognizer: recognizer,
 		semaphore:  make(chan struct{}, config.MaxConcurrent),
+		logger:     telemetry.LoggerOrDiscard(config.Logger).With("component", "httpapi"),
 	}, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	tracked := &loggingResponseWriter{ResponseWriter: w}
+	w = tracked
 	requestID, validID, err := requestIDFor(r)
 	if err != nil {
 		return
 	}
+	r = r.WithContext(telemetry.WithRequestID(r.Context(), requestID))
+	requestLogger := h.logger.With("request_id", requestID)
+	completionErrorCode := ""
+	logCompletion := func(errorCode string) {
+		if errorCode == "" {
+			if completionErrorCode != "" {
+				errorCode = completionErrorCode
+			} else {
+				errorCode = errorCodeForStatus(tracked.status)
+				if tracked.status == 0 && r.Context().Err() != nil {
+					errorCode = "cancelled"
+				}
+			}
+		}
+		if r.URL.Path != statsPath && h.config.Metrics != nil {
+			_ = h.config.Metrics.ObserveHTTP(tracked.status, time.Since(started), tracked.bytes)
+		}
+		level := requestLogLevel(tracked.status)
+		if errorCode == "request_aborted" {
+			level = slog.LevelWarn
+		}
+		if errorCode == "internal_panic" {
+			level = slog.LevelError
+		}
+		requestLogger.Log(r.Context(), level, "http.request.completed",
+			"event", "http.request.completed", "method", safeMethod(r.Method), "route", safeRoute(r.URL.Path),
+			"status", tracked.status, "duration_ms", elapsedMillis(started), "response_bytes", tracked.bytes,
+			"error_code", errorCode)
+	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if recovered == http.ErrAbortHandler {
+				logCompletion("request_aborted")
+				panic(http.ErrAbortHandler)
+			}
+			requestLogger.Error("http.request.panic", "event", "http.request.panic", "error_code", "internal_panic")
+			logCompletion("internal_panic")
+			panic(http.ErrAbortHandler)
+		}
+		logCompletion("")
+	}()
 	if !validID {
 		writeError(w, requestID, http.StatusBadRequest, "invalid_request", "Некорректный запрос.")
 		return
 	}
 	if r.URL.Path != recognizePath {
+		if r.URL.Path == statsPath {
+			h.serveStats(w, r, requestID, &completionErrorCode)
+			return
+		}
 		writeError(w, requestID, http.StatusNotFound, "not_found", "Ресурс не найден.")
 		return
 	}
@@ -154,6 +210,120 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Request-ID", requestID)
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(response)
+}
+
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (w *loggingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *loggingResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *loggingResponseWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	n, err := w.ResponseWriter.Write(data)
+	w.bytes += int64(n)
+	return n, err
+}
+
+func safeMethod(method string) string {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete, http.MethodOptions:
+		return method
+	default:
+		return "OTHER"
+	}
+}
+
+func safeRoute(path string) string {
+	if path == recognizePath {
+		return recognizePath
+	}
+	if path == statsPath {
+		return statsPath
+	}
+	return "unmatched"
+}
+
+type statsResponse struct {
+	RequestID  string           `json:"request_id"`
+	Statistics metrics.Snapshot `json:"statistics"`
+}
+
+func (h *handler) serveStats(w http.ResponseWriter, r *http.Request, requestID string, completionErrorCode *string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeError(w, requestID, http.StatusMethodNotAllowed, "method_not_allowed", "Метод запроса не поддерживается.")
+		return
+	}
+	if !remoteAddrAllowed(r.RemoteAddr, h.config.AllowedClientNetworks) {
+		writeError(w, requestID, http.StatusForbidden, "access_denied", "Доступ запрещён.")
+		return
+	}
+	if h.config.Metrics == nil {
+		*completionErrorCode = "statistics_unavailable"
+		writeError(w, requestID, http.StatusServiceUnavailable, "statistics_unavailable", "Статистика временно недоступна.")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("X-Request-ID", requestID)
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(statsResponse{RequestID: requestID, Statistics: h.config.Metrics.Snapshot()})
+}
+
+func elapsedMillis(started time.Time) int64 { return time.Since(started).Milliseconds() }
+
+func requestLogLevel(status int) slog.Level {
+	switch {
+	case status >= 500:
+		return slog.LevelError
+	case status >= 400:
+		return slog.LevelWarn
+	default:
+		return slog.LevelInfo
+	}
+}
+
+func errorCodeForStatus(status int) string {
+	switch status {
+	case http.StatusOK:
+		return "ok"
+	case http.StatusBadRequest:
+		return "invalid_request"
+	case http.StatusForbidden:
+		return "access_denied"
+	case http.StatusRequestEntityTooLarge:
+		return "upload_too_large"
+	case http.StatusUnsupportedMediaType:
+		return "unsupported_media_type"
+	case http.StatusUnprocessableEntity:
+		return "image_unprocessable"
+	case http.StatusTooManyRequests:
+		return "concurrency_limit_reached"
+	case http.StatusInternalServerError:
+		return "processing_failed"
+	case http.StatusServiceUnavailable:
+		return "ocr_unavailable"
+	case http.StatusGatewayTimeout:
+		return "processing_timeout"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
+	default:
+		return ""
+	}
 }
 
 func (h *handler) readImage(w http.ResponseWriter, r *http.Request) (Image, int, string, string) {
