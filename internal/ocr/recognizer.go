@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"passport-backend/internal/httpapi"
+	"passport-backend/internal/jsonstrict"
 	"passport-backend/internal/metrics"
 	"passport-backend/internal/passport"
 	"passport-backend/internal/telemetry"
@@ -67,7 +68,7 @@ type Recognizer struct {
 
 // New validates configured paths and starts the private RussianDocsOCR worker.
 func New(config Config) (*Recognizer, error) {
-	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+	if !supportedRuntimePlatform(runtime.GOOS) {
 		return nil, httpapi.ErrUnavailable
 	}
 	if strings.TrimSpace(config.PipelineVersion) == "" || config.MaxInputBytes <= 0 ||
@@ -80,6 +81,10 @@ func New(config Config) (*Recognizer, error) {
 	return newRussianRecognizer(config)
 }
 
+func supportedRuntimePlatform(goos string) bool {
+	return goos == "darwin" || goos == "linux"
+}
+
 func configuredPath(value string, executable, directory bool) (string, error) {
 	if value == "" || !filepath.IsAbs(value) {
 		return "", errors.New("path must be absolute")
@@ -89,21 +94,28 @@ func configuredPath(value string, executable, directory bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := validateConfiguredPathType(path, info, executable, directory); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func validateConfiguredPathType(path string, info os.FileInfo, executable, directory bool) error {
 	if directory {
 		if !info.IsDir() {
-			return "", errors.New("path is not a directory")
+			return errors.New("path is not a directory")
 		}
 		linkInfo, err := os.Lstat(path)
 		if err != nil || linkInfo.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("directory symlink is not allowed")
+			return errors.New("directory symlink is not allowed")
 		}
 	} else if !info.Mode().IsRegular() {
-		return "", errors.New("path is not a regular file")
+		return errors.New("path is not a regular file")
 	}
 	if executable && info.Mode().Perm()&0o111 == 0 {
-		return "", errors.New("path is not executable")
+		return errors.New("path is not executable")
 	}
-	return path, nil
+	return nil
 }
 
 // Recognize runs the private RussianDocsOCR worker and returns its canonical
@@ -163,9 +175,9 @@ func (r *Recognizer) recognize(ctx context.Context, image httpapi.Image, request
 		return passport.Extraction{}, err
 	}
 
-	jobRoot, err := os.MkdirTemp(r.config.WorkRoot, "job-")
+	job, jobRoot, err := createWorkerJob(r.config.WorkRoot, image, requestID)
 	if err != nil {
-		return passport.Extraction{}, httpapi.ErrUnavailable
+		return passport.Extraction{}, err
 	}
 	defer func() {
 		if err := os.RemoveAll(jobRoot); err != nil {
@@ -173,29 +185,56 @@ func (r *Recognizer) recognize(ctx context.Context, image httpapi.Image, request
 			retErr = errors.New("OCR workspace cleanup failed")
 		}
 	}()
-	if err := os.Chmod(jobRoot, 0o700); err != nil {
-		return passport.Extraction{}, errors.New("OCR workspace setup failed")
-	}
+	return r.russian.recognize(jobCtx, job, image.Data)
+}
 
+func createWorkerJob(workRoot string, image httpapi.Image, requestID string) (workerJob, string, error) {
+	jobRoot, err := createJobWorkspace(workRoot)
+	if err != nil {
+		return workerJob{}, "", err
+	}
 	imageID, err := newImageID()
 	if err != nil {
-		return passport.Extraction{}, errors.New("OCR request setup failed")
+		return workerJob{}, "", cleanupWorkerWorkspace(jobRoot, errors.New("OCR request setup failed"))
 	}
 	imagePath := filepath.Join(jobRoot, "upload"+mediaExtension(image.MediaType))
+	if err := writeWorkerImage(imagePath, image.Data); err != nil {
+		return workerJob{}, "", cleanupWorkerWorkspace(jobRoot, err)
+	}
+	return workerJob{ImagePath: imagePath, ImageID: imageID, RequestID: requestID, MediaType: image.MediaType}, jobRoot, nil
+}
+
+func createJobWorkspace(workRoot string) (string, error) {
+	jobRoot, err := os.MkdirTemp(workRoot, "job-")
+	if err != nil {
+		return "", httpapi.ErrUnavailable
+	}
+	if err := os.Chmod(jobRoot, 0o700); err != nil {
+		return "", cleanupWorkerWorkspace(jobRoot, errors.New("OCR workspace setup failed"))
+	}
+	return jobRoot, nil
+}
+
+func writeWorkerImage(imagePath string, imageData []byte) error {
 	file, err := os.OpenFile(imagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
-		return passport.Extraction{}, errors.New("OCR workspace setup failed")
+		return errors.New("OCR workspace setup failed")
 	}
-	if _, err = file.Write(image.Data); err != nil {
+	if _, err := file.Write(imageData); err != nil {
 		_ = file.Close()
-		return passport.Extraction{}, errors.New("OCR workspace setup failed")
+		return errors.New("OCR workspace setup failed")
 	}
-	if err = file.Close(); err != nil {
-		return passport.Extraction{}, errors.New("OCR workspace setup failed")
+	if err := file.Close(); err != nil {
+		return errors.New("OCR workspace setup failed")
 	}
+	return nil
+}
 
-	job := workerJob{ImagePath: imagePath, ImageID: imageID, RequestID: requestID, MediaType: image.MediaType}
-	return r.russian.recognize(jobCtx, job, image.Data)
+func cleanupWorkerWorkspace(jobRoot string, cause error) error {
+	if err := os.RemoveAll(jobRoot); err != nil {
+		return errors.New("OCR workspace cleanup failed")
+	}
+	return cause
 }
 
 func normalizedJobError(err error) string {
@@ -343,75 +382,9 @@ func strictJSON(data []byte, target any) error {
 
 func rejectDuplicateJSONKeys(data []byte) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
 	root, err := decoder.Token()
 	if err != nil || root != json.Delim('{') {
 		return errors.New("OCR JSON root must be an object")
 	}
-	if err := scanJSONObject(decoder); err != nil {
-		return err
-	}
-	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return errors.New("trailing JSON token")
-		}
-		return err
-	}
-	return nil
-}
-
-func scanJSONObject(decoder *json.Decoder) error {
-	seen := make(map[string]struct{})
-	for decoder.More() {
-		token, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		key, ok := token.(string)
-		if !ok {
-			return errors.New("invalid JSON object key")
-		}
-		if _, exists := seen[key]; exists {
-			return errors.New("duplicate JSON object key")
-		}
-		seen[key] = struct{}{}
-		value, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if err := scanJSONValue(decoder, value); err != nil {
-			return err
-		}
-	}
-	_, err := decoder.Token()
-	return err
-}
-
-func scanJSONArray(decoder *json.Decoder) error {
-	for decoder.More() {
-		value, err := decoder.Token()
-		if err != nil {
-			return err
-		}
-		if err := scanJSONValue(decoder, value); err != nil {
-			return err
-		}
-	}
-	_, err := decoder.Token()
-	return err
-}
-
-func scanJSONValue(decoder *json.Decoder, value json.Token) error {
-	delim, ok := value.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delim {
-	case '{':
-		return scanJSONObject(decoder)
-	case '[':
-		return scanJSONArray(decoder)
-	default:
-		return errors.New("unexpected JSON delimiter")
-	}
+	return jsonstrict.RejectDuplicateKeys(data)
 }

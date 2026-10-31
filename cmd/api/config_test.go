@@ -133,6 +133,109 @@ func TestLoadConfigRejectsMalformedOrNonStrictJSON(t *testing.T) {
 	}
 }
 
+func TestLoadRuntimeConfigRejectsFilesAboveSizeLimit(t *testing.T) {
+	configPath := writeAPIConfig(t, strings.Repeat(" ", maxConfigBytes+1))
+	_, _, _, err := loadRuntimeConfig(configPath)
+	if err == nil || err.Error() != "invalid config file size" {
+		t.Fatalf("loadRuntimeConfig() error = %v, want oversized file rejection", err)
+	}
+}
+
+func TestLoadRuntimeConfigAcceptsFileAtSizeLimit(t *testing.T) {
+	contents := validAPIConfig()
+	contents += strings.Repeat(" ", maxConfigBytes-len(contents))
+	if len(contents) != maxConfigBytes {
+		t.Fatalf("config fixture size = %d, want %d", len(contents), maxConfigBytes)
+	}
+	if _, _, _, err := loadRuntimeConfig(writeAPIConfig(t, contents)); err != nil {
+		t.Fatalf("loadRuntimeConfig() rejected config at size limit: %v", err)
+	}
+}
+
+func TestLoadRuntimeConfigAcceptsInclusiveLimitBoundaries(t *testing.T) {
+	const maxUploadBytes = int64(^uint64(0)>>1) - (64 << 10)
+	tests := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "minimum upload bytes", field: "max_upload_bytes", value: int64(1)},
+		{name: "maximum upload bytes", field: "max_upload_bytes", value: maxUploadBytes},
+		{name: "minimum header bytes", field: "max_header_bytes", value: 1},
+		{name: "minimum output bytes", field: "max_output_bytes", value: 1},
+		{name: "minimum image pixels", field: "max_image_pixels", value: int64(1)},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := decodeFixtureMap(t, validAPIConfig())
+			config[test.field] = test.value
+			if _, _, _, err := loadRuntimeConfig(writeAPIConfig(t, encodeFixture(t, config))); err != nil {
+				t.Fatalf("loadRuntimeConfig() rejected inclusive boundary: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRuntimeConfigRejectsUploadBytesAboveInclusiveLimit(t *testing.T) {
+	const maxUploadBytes = int64(^uint64(0)>>1) - (64 << 10)
+	config := decodeFixtureMap(t, validAPIConfig())
+	config["max_upload_bytes"] = maxUploadBytes + 1
+	if _, _, _, err := loadRuntimeConfig(writeAPIConfig(t, encodeFixture(t, config))); err == nil || err.Error() != "invalid config field: max_upload_bytes" {
+		t.Fatalf("loadRuntimeConfig() error = %v, want upload limit rejection", err)
+	}
+}
+
+func TestLoadRuntimeConfigAcceptsInclusiveLoggingBoundaries(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxSize    int64
+		maxBackups int
+	}{
+		{name: "minimum size", maxSize: 8192, maxBackups: 3},
+		{name: "zero backups", maxSize: 5 << 20, maxBackups: 0},
+		{name: "maximum backups", maxSize: 5 << 20, maxBackups: 10},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := decodeFixtureMap(t, validAPIConfig())
+			logging := config["logging"].(map[string]any)
+			logging["max_size_bytes"] = test.maxSize
+			logging["max_backups"] = test.maxBackups
+			if _, _, _, err := loadRuntimeConfig(writeAPIConfig(t, encodeFixture(t, config))); err != nil {
+				t.Fatalf("loadRuntimeConfig() rejected inclusive logging boundary: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadRuntimeConfigAcceptsReadHeaderTimeoutEqualToReadTimeout(t *testing.T) {
+	config := decodeFixtureMap(t, validAPIConfig())
+	config["read_header_timeout"] = "30s"
+	if _, _, _, err := loadRuntimeConfig(writeAPIConfig(t, encodeFixture(t, config))); err != nil {
+		t.Fatalf("loadRuntimeConfig() rejected equal read timeouts: %v", err)
+	}
+}
+
+func TestLoadRuntimeConfigAcceptsOneNanosecondStartupTimeout(t *testing.T) {
+	config := decodeFixtureMap(t, validAPIConfig())
+	config["ocr"].(map[string]any)["russian_docs_startup_timeout"] = "1ns"
+	_, providerConfig, _, err := loadRuntimeConfig(writeAPIConfig(t, encodeFixture(t, config)))
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() rejected positive startup timeout: %v", err)
+	}
+	if providerConfig.StartupTimeout != time.Nanosecond {
+		t.Errorf("StartupTimeout = %s, want %s", providerConfig.StartupTimeout, time.Nanosecond)
+	}
+}
+
+func TestLoadRuntimeConfigRejectsWriteTimeoutAtExactOCRMargin(t *testing.T) {
+	config := decodeFixtureMap(t, validAPIConfig())
+	config["write_timeout"] = "8m30s"
+	if _, _, _, err := loadRuntimeConfig(writeAPIConfig(t, encodeFixture(t, config))); err == nil || err.Error() != "invalid config timing: write_timeout must exceed read_timeout plus ocr_timeout" {
+		t.Fatalf("loadRuntimeConfig() error = %v, want exact OCR margin rejection", err)
+	}
+}
+
 func TestLoadConfigRequiresEveryExplicitSetting(t *testing.T) {
 	base := validAPIConfig()
 	missing := []struct {
@@ -214,6 +317,57 @@ func TestLoadConfigRejectsInvalidDurationsAndLimits(t *testing.T) {
 			test.edit(config)
 			if _, _, err := loadConfig(writeAPIConfig(t, encodeFixture(t, config))); err == nil {
 				t.Fatal("loadConfig() error = nil, want invalid limit rejected")
+			}
+		})
+	}
+}
+
+func TestLoadConfigPreservesValidationErrorPrecedence(t *testing.T) {
+	tests := []struct {
+		name    string
+		edit    func(map[string]any)
+		wantErr string
+	}{
+		{
+			name: "required listener before logging",
+			edit: func(config map[string]any) {
+				config["listen_address"] = " "
+				config["logging"].(map[string]any)["level"] = "trace"
+			},
+			wantErr: "invalid config field: listen_address",
+		},
+		{
+			name: "CIDRs before durations",
+			edit: func(config map[string]any) {
+				config["allowed_client_networks"] = []string{"local"}
+				config["ocr_timeout"] = "later"
+			},
+			wantErr: "invalid config field: allowed_client_networks",
+		},
+		{
+			name: "durations before OCR paths",
+			edit: func(config map[string]any) {
+				config["ocr_timeout"] = "later"
+				config["ocr"].(map[string]any)["work_root"] = " "
+			},
+			wantErr: "invalid config field: ocr_timeout",
+		},
+		{
+			name: "OCR paths before metrics path",
+			edit: func(config map[string]any) {
+				config["ocr"].(map[string]any)["work_root"] = " "
+				config["metrics"].(map[string]any)["state_path"] = " "
+			},
+			wantErr: "invalid config field: ocr.work_root",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := decodeFixtureMap(t, validAPIConfig())
+			test.edit(config)
+			_, _, err := loadConfig(writeAPIConfig(t, encodeFixture(t, config)))
+			if err == nil || err.Error() != test.wantErr {
+				t.Fatalf("loadConfig() error = %v, want %q", err, test.wantErr)
 			}
 		})
 	}
