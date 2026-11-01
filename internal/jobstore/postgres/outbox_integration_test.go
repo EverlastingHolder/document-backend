@@ -136,6 +136,61 @@ func TestPostgresTerminalTransitionsClampFutureTimestamps(t *testing.T) {
 		assertTerminalTimestamps(t, submission.JobID, string(jobs.StatusFailed), true)
 	})
 
+	t.Run("retry clamps future created timestamp and shares outbox schedule", func(t *testing.T) {
+		retryService, err := jobexecution.New(store, jobexecution.Config{
+			PipelineVersion: "integration-retry-clock-v1", LeaseDuration: 2 * time.Hour,
+			ProcessingTimeout: time.Hour, CompletionBudget: 30 * time.Minute,
+			RetryPolicy: jobs.RetryPolicy{MaxAttempts: 2, InitialBackoff: time.Second, MaxBackoff: time.Second},
+		})
+		if err != nil {
+			t.Fatalf("construct retry service: %v", err)
+		}
+		submission := newFixture(t, "retry-clock")
+		envelope := jobs.Envelope{SchemaVersion: 1, EventID: submission.EventID, JobID: submission.JobID, AttemptNo: 1}
+		claim, err := retryService.Claim(ctx, envelope)
+		if err != nil || claim.Execution == nil {
+			t.Fatalf("claim = (%+v, %v)", claim, err)
+		}
+		var created, started time.Time
+		if err := pool.QueryRow(ctx, `
+			WITH future AS MATERIALIZED (SELECT clock_timestamp() + interval '1 hour' AS created)
+			UPDATE jobs SET created_at=future.created, available_at=future.created,
+			    started_at=future.created + interval '1 hour', updated_at=future.created + interval '1 hour'
+			FROM future WHERE job_id=$1 RETURNING created_at, started_at`, submission.JobID).Scan(&created, &started); err != nil {
+			t.Fatalf("set future job timestamps: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `
+			UPDATE job_attempts SET started_at=$2::timestamptz,
+			    lease_expires_at=$2::timestamptz + interval '2 hours'
+			WHERE job_id=$1 AND attempt_no=1 AND state='processing'`, submission.JobID, started); err != nil {
+			t.Fatalf("set future attempt timestamps: %v", err)
+		}
+		decision, err := retryService.Fail(ctx, jobs.Failure{
+			Envelope: envelope, AttemptToken: claim.Execution.AttemptToken, ErrorCode: "processing_failed",
+		})
+		if err != nil || decision != jobs.DecisionAck {
+			t.Fatalf("retryable Fail = (%q, %v), want durable ACK", decision, err)
+		}
+		var state string
+		var persistedCreated, available, updated time.Time
+		if err := pool.QueryRow(ctx, `SELECT state, created_at, available_at, updated_at FROM jobs WHERE job_id=$1`, submission.JobID).
+			Scan(&state, &persistedCreated, &available, &updated); err != nil {
+			t.Fatalf("read retry-scheduled job: %v", err)
+		}
+		if state != string(jobs.StatusQueued) || persistedCreated != created || available != created || updated.Before(started) {
+			t.Fatalf("retry state=%s available_at_at_created=%t updated_at>=started_at=%t, want queued with minimum legal retry time and preserved timestamp invariant", state, available == created, !updated.Before(started))
+		}
+		var outboxAvailable, outboxCreated time.Time
+		if err := pool.QueryRow(ctx, `SELECT available_at, created_at FROM outbox WHERE job_id=$1 AND attempt_no=2`, submission.JobID).
+			Scan(&outboxAvailable, &outboxCreated); err != nil {
+			t.Fatalf("read retry outbox schedule: %v", err)
+		}
+		if outboxAvailable != available || outboxAvailable.Before(outboxCreated) {
+			t.Fatalf("retry outbox available_at_matches_job=%t available_at>=created_at=%t; want shared schema-valid retry schedule", outboxAvailable == available, !outboxAvailable.Before(outboxCreated))
+		}
+		assertLifecycleCounts(t, ctx, pool, submission.JobID, 1, 2)
+	})
+
 	t.Run("known queued poison clamps terminal job timestamp", func(t *testing.T) {
 		submission := newFixture(t, "rejected")
 		setFutureJobStart(t, submission.JobID, false)

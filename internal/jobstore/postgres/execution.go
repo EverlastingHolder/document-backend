@@ -630,11 +630,16 @@ func retryOrFinishAttempt(ctx context.Context, tx pgx.Tx, jobID string, attemptC
 	nextAttempt := attemptNo + 1
 	backoff := retryBackoff(policy, attemptNo)
 	availableAt := now.Add(backoff)
-	if err := execExactlyOne(ctx, tx, `
+	err := tx.QueryRow(ctx, `
 		UPDATE jobs SET state='queued', error_code=NULL, result=NULL, finished_at=NULL,
-			available_at=$2, updated_at=clock_timestamp()
-		WHERE job_id=$1 AND state='processing' AND attempt_count=$3`, jobID, availableAt, attemptNo); err != nil {
-		return err
+			available_at=GREATEST($2, created_at, transaction_timestamp()), updated_at=GREATEST(clock_timestamp(), created_at, updated_at, started_at)
+		WHERE job_id=$1 AND state='processing' AND attempt_count=$3
+		RETURNING available_at`, jobID, availableAt, attemptNo).Scan(&availableAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return jobs.ErrInvalidTransition
+	}
+	if err != nil {
+		return safeStorageFailure(ctx, "execution_sql", err)
 	}
 	eventID, err := randomUUIDv4()
 	if err != nil {

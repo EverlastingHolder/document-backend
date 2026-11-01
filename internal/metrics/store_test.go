@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -21,6 +22,76 @@ func testConfig(t *testing.T) Config {
 		t.Fatal(err)
 	}
 	return Config{Path: filepath.Join(private, "metrics.json"), PipelineVersion: "test-v1"}
+}
+
+func persistedTestSnapshot(t *testing.T, config Config, recordHTTP bool) Snapshot {
+	t.Helper()
+	store, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recordHTTP {
+		if err := store.ObserveHTTP(200, time.Millisecond, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot := store.Snapshot()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
+}
+
+func writeTestSnapshot(t *testing.T, config Config, snapshot Snapshot) {
+	t.Helper()
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.Path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenAcceptsSnapshotAtMaximumSize(t *testing.T) {
+	config := testConfig(t)
+	persistedTestSnapshot(t, config, false)
+	data, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) >= maxStateBytes {
+		t.Fatalf("seed snapshot size=%d, want less than %d", len(data), maxStateBytes)
+	}
+	data = append(data, bytes.Repeat([]byte(" "), maxStateBytes-len(data))...)
+	if err := os.WriteFile(config.Path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(config)
+	if err != nil {
+		t.Fatalf("Open() rejected a valid snapshot exactly at the size limit: %v", err)
+	}
+	defer store.Close()
+	if got := store.Snapshot(); got.PipelineVersion != config.PipelineVersion || got.Persistence.Healthy != true {
+		t.Fatalf("opened boundary snapshot = %+v", got)
+	}
+}
+
+func TestDecodeSnapshotRejectsOversizedValidJSON(t *testing.T) {
+	config := testConfig(t)
+	persistedTestSnapshot(t, config, false)
+	data, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) >= maxStateBytes {
+		t.Fatalf("seed snapshot size=%d, want less than %d", len(data), maxStateBytes)
+	}
+	data = append(data, bytes.Repeat([]byte(" "), maxStateBytes+1-len(data))...)
+	var snapshot Snapshot
+	if _, err := decodeSnapshot(data, config.PipelineVersion, &snapshot); err == nil {
+		t.Fatal("decodeSnapshot accepted a valid JSON document above the state size limit")
+	}
 }
 
 func TestStorePersistsBoundedHTTPOCRAndStageStatistics(t *testing.T) {
@@ -135,6 +206,93 @@ func TestOpenRejectsCorruptStateAndPipelineMismatch(t *testing.T) {
 	config.PipelineVersion = "different-v2"
 	if _, err := Open(config); err == nil {
 		t.Fatal("Open accepted pipeline mismatch")
+	}
+}
+
+func TestOpenRejectsDuplicateSnapshotKeys(t *testing.T) {
+	config := testConfig(t)
+	persistedTestSnapshot(t, config, false)
+	data, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append([]byte(`{"schema_version":"passport-metrics/v1",`), data[1:]...)
+	if err := os.WriteFile(config.Path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(config); err == nil {
+		_ = store.Close()
+		t.Fatal("Open() accepted a persisted snapshot with a duplicate key")
+	}
+}
+
+func TestOpenRejectsInconsistentPersistedCountersAndHistograms(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Snapshot)
+	}{
+		{
+			name: "completed OCR count cannot exceed total",
+			mutate: func(snapshot *Snapshot) {
+				snapshot.OCR.Completed = 1
+				snapshot.OCR.Failed = ^uint64(0)
+				snapshot.OCR.ByErrorCode["image_unprocessable"] = ^uint64(0)
+			},
+		},
+		{
+			name: "HTTP status counts must match total",
+			mutate: func(snapshot *Snapshot) {
+				snapshot.HTTP.ByStatus["200"] = 0
+			},
+		},
+		{
+			name: "HTTP duration count must match total",
+			mutate: func(snapshot *Snapshot) {
+				snapshot.HTTP.Duration.Count = 0
+				snapshot.HTTP.Duration.SumMS = 0
+				snapshot.HTTP.Duration.MinMS = 0
+				snapshot.HTTP.Duration.MaxMS = 0
+				for i := range snapshot.HTTP.Duration.Buckets {
+					snapshot.HTTP.Duration.Buckets[i].Count = 0
+				}
+			},
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			config := testConfig(t)
+			snapshot := persistedTestSnapshot(t, config, true)
+			test.mutate(&snapshot)
+			writeTestSnapshot(t, config, snapshot)
+			if store, err := Open(config); err == nil {
+				_ = store.Close()
+				t.Fatal("Open() accepted inconsistent persisted counters")
+			}
+		})
+	}
+}
+
+func TestOpenAcceptsPersistedSuccessfulOCRJob(t *testing.T) {
+	config := testConfig(t)
+	store, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ObserveOCRJob(true, "", 25*time.Millisecond); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(config)
+	if err != nil {
+		t.Fatalf("Open() rejected a persisted successful OCR job: %v", err)
+	}
+	defer store.Close()
+	got := store.Snapshot().OCR
+	if got.Total != 1 || got.Completed != 1 || got.Failed != 0 || got.Duration.Count != 1 {
+		t.Fatalf("persisted OCR counters = %+v", got)
 	}
 }
 
