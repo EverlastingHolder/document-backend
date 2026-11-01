@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"net/url"
 	"os"
@@ -543,17 +544,19 @@ func writeOrVerify(root, name string, contents []byte, uid, gid int, mode os.Fil
 }
 
 func readVerified(path string, uid, gid int, mode os.FileMode) ([]byte, error) {
-	info, err := os.Lstat(path)
+	fd, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != mode {
+	defer fd.Close()
+	info, err := fd.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != mode {
 		return nil, errors.New("persisted bootstrap file permissions invalid")
 	}
 	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || int(stat.Uid) != uid || int(stat.Gid) != gid || uint64(stat.Nlink) != 1 {
 		return nil, errors.New("persisted bootstrap file ownership invalid")
 	}
-	return os.ReadFile(path)
+	return io.ReadAll(io.LimitReader(fd, 1<<20))
 }
 
 func postgresDSN(password string) string {
