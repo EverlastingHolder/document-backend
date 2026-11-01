@@ -68,5 +68,24 @@
 !deploy/api-entrypoint.sh
 !deploy/ops-entrypoint.sh
 
+# The portable OCR Dockerfile-specific ignore file is honored by BuildKit, but
+# the legacy builder only reads this root file. Keep its exact COPY inputs
+# available so portable builds also work during a BuildKit fallback.
+!deploy/ocr/
+deploy/ocr/*
+!deploy/ocr/entrypoint.sh
+!scripts/
+scripts/**
+!scripts/build-linux-deployment-kit.py
+!scripts/fetch_portable_ocr_assets.py
+!ocr/
+ocr/**
+!ocr/requirements-worker.txt
+!ocr/runtime/
+ocr/runtime/**
+!ocr/runtime/async_consumer.py
+!ocr/runtime/russiandocs_worker.py
+!ocr/runtime/secret_bootstrap.py
+
 # Production images do not need repository test sources.
 **/*_test.go
