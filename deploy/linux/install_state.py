@@ -401,6 +401,29 @@ def is_lan_bind_address(value: str) -> bool:
     return any(address in network for network in allowed)
 
 
+def is_assigned_lan_bind_address(value: str, address_output: Optional[str] = None) -> bool:
+    if not is_lan_bind_address(value):
+        return False
+    if address_output is None:
+        try:
+            address_output = subprocess.check_output(["ip", "-4", "-o", "addr", "show"],
+                                                     text=True, stderr=subprocess.DEVNULL)
+        except Exception:
+            return False
+    wanted = ipaddress.IPv4Address(value)
+    for line in address_output.splitlines():
+        parts = line.split()
+        if "inet" not in parts:
+            continue
+        try:
+            address = ipaddress.ip_address(parts[parts.index("inet") + 1].split("/", 1)[0])
+        except (ValueError, IndexError):
+            continue
+        if address == wanted:
+            return True
+    return False
+
+
 def ingress_identity_matches(marker: dict[str, Any], domain: str, public_bind: str, tls_mode: str,
                              certificate_sha256: Optional[str], http_port: Optional[int]) -> bool:
     return (marker.get("domain") == domain and marker.get("public_bind") == public_bind and
@@ -408,8 +431,8 @@ def ingress_identity_matches(marker: dict[str, Any], domain: str, public_bind: s
             marker.get("http_port") == http_port)
 
 
-def install_env(runtime: Path, subnet: str, domain: str, public_bind: str, uid: int, gid: int,
-                tls_mode: str, http_port: int) -> dict[str, str]:
+def compose_env_values(runtime: Path, subnet: str, domain: str, public_bind: str, uid: int, gid: int,
+                       tls_mode: str, http_port: int) -> dict[str, str]:
     network = ipaddress.ip_network(subnet)
     ip = lambda n: str(network.network_address + n)
     env = {
@@ -443,6 +466,12 @@ def install_env(runtime: Path, subnet: str, domain: str, public_bind: str, uid: 
         env["PASSPORT_TLS_PRIVATE_KEY_FILE"] = str(runtime / "secrets/tls.key")
     if tls_mode == "lan":
         env["PASSPORT_HTTP_PORT"] = str(http_port)
+    return env
+
+
+def install_env(runtime: Path, subnet: str, domain: str, public_bind: str, uid: int, gid: int,
+                tls_mode: str, http_port: int) -> dict[str, str]:
+    env = compose_env_values(runtime, subnet, domain, public_bind, uid, gid, tls_mode, http_port)
     name = {"static": "compose.static.env", "managed": "compose.env", "lan": "compose.lan.env"}[tls_mode]
     path = runtime / name
     data = "".join(f"{key}={value}\n" for key, value in env.items()).encode()
@@ -758,6 +787,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     verify = sub.add_parser("verify-bundle")
     verify.add_argument("--kit-root", required=True)
+    validate_bind = sub.add_parser("validate-lan-bind")
+    validate_bind.add_argument("--address", required=True)
     prepare_parser = sub.add_parser("prepare")
     prepare_parser.add_argument("--kit-root", required=True)
     prepare_parser.add_argument("--runtime-root", required=True)
@@ -776,6 +807,9 @@ def main() -> int:
     try:
         if args.command == "verify-bundle":
             verify_bundle(args)
+        elif args.command == "validate-lan-bind":
+            if not is_assigned_lan_bind_address(args.address):
+                fail("LAN bind address is not assigned to this host")
         elif args.command == "prepare":
             prepare(args)
         else:

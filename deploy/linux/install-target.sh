@@ -35,34 +35,9 @@ fail() { echo "passport install: $1" >&2; exit 1; }
 if ((lan_mode)); then
 	[[ -z "$domain" && -z "$tls_cert" && -z "$tls_key" ]] || fail "--lan cannot be combined with --domain or TLS certificate options"
 	((bind_was_set)) || fail "--lan requires an explicit --public-bind private IPv4 address"
-	python3 - "$public_bind" <<'PY' || fail "LAN --public-bind must be a private or loopback IPv4 address assigned to this host"
-import ipaddress, subprocess, sys
-try:
-    address = ipaddress.ip_address(sys.argv[1])
-except ValueError:
-    raise SystemExit(1)
-if not isinstance(address, ipaddress.IPv4Address):
-    raise SystemExit(1)
-allowed = (ipaddress.ip_network("10.0.0.0/8"), ipaddress.ip_network("172.16.0.0/12"),
-           ipaddress.ip_network("192.168.0.0/16"), ipaddress.ip_network("127.0.0.0/8"))
-if not any(address in network for network in allowed):
-    raise SystemExit(1)
-try:
-    output = subprocess.check_output(["ip", "-4", "-o", "addr", "show"], text=True, stderr=subprocess.DEVNULL)
-except Exception:
-    raise SystemExit(1)
-assigned = set()
-for line in output.splitlines():
-    parts = line.split()
-    if "inet" in parts:
-        value = parts[parts.index("inet") + 1].split("/", 1)[0]
-        try:
-            assigned.add(ipaddress.ip_address(value))
-        except ValueError:
-            pass
-if address not in assigned:
-    raise SystemExit(1)
-PY
+	[[ -f "$kit_root/deploy/linux/install_state.py" ]] || fail "installation kit is incomplete"
+	python3 "$kit_root/deploy/linux/install_state.py" validate-lan-bind --address "$public_bind" || \
+		fail "LAN --public-bind must be a private or loopback IPv4 address assigned to this host"
 else
 	[[ -n "$domain" ]] || { usage >&2; fail "--domain is required outside LAN mode"; }
 	[[ "$domain" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[A-Za-z]{2,63}$ ]] || fail "domain format is invalid"

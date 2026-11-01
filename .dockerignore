@@ -8,6 +8,8 @@
 !cmd/api/*.go
 !cmd/migrate/
 !cmd/migrate/*.go
+!cmd/deployment-init/
+!cmd/deployment-init/*.go
 !cmd/client-admin/
 !cmd/client-admin/*.go
 !cmd/passport-ops/
@@ -61,6 +63,7 @@
 !deploy/
 !deploy/Dockerfile.migrate
 !deploy/Dockerfile.api
+!deploy/Dockerfile.deployment-init
 !deploy/Dockerfile.ops
 !deploy/api-entrypoint.sh
 !deploy/ops-entrypoint.sh

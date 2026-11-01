@@ -4,13 +4,13 @@ import importlib.util
 import ipaddress
 import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "deploy/linux/install_state.py"
+REPO_ROOT = SCRIPT_PATH.parents[2]
 SPEC = importlib.util.spec_from_file_location("passport_install_state", SCRIPT_PATH)
 assert SPEC is not None and SPEC.loader is not None
 install_state = importlib.util.module_from_spec(SPEC)
@@ -93,6 +93,12 @@ class LanBindPolicyTests(unittest.TestCase):
             with self.subTest(address=address):
                 self.assertFalse(install_state.is_lan_bind_address(address))
 
+    def test_requires_selected_private_address_to_be_assigned(self) -> None:
+        output = "2: eth0 inet 192.168.1.40/24 brd 192.168.1.255 scope global eth0\n"
+        self.assertTrue(install_state.is_assigned_lan_bind_address("192.168.1.40", output))
+        self.assertFalse(install_state.is_assigned_lan_bind_address("192.168.1.41", output))
+        self.assertFalse(install_state.is_assigned_lan_bind_address("8.8.8.8", output))
+
     def test_ingress_mode_bind_and_port_are_part_of_rerun_identity(self) -> None:
         lan = {"domain": "", "public_bind": "192.168.1.40", "tls_mode": "lan",
                "certificate_sha256": None, "http_port": 8080}
@@ -109,18 +115,30 @@ class LanBindPolicyTests(unittest.TestCase):
             legacy_https, "api.example.test", "0.0.0.0", "managed", None, None))
 
     def test_lan_environment_uses_http_only_overlay_values(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            env = install_state.install_env(Path(tmp), "172.29.0.0/24", "", "192.168.1.40", 10001, 10001,
-                                            "lan", install_state.LAN_HTTP_PORT)
-            self.assertTrue((Path(tmp) / "compose.lan.env").is_file())
-            self.assertEqual(env["PASSPORT_PUBLIC_BIND"], "192.168.1.40")
-            self.assertEqual(env["PASSPORT_HTTP_PORT"], "8080")
-            self.assertEqual(env["PASSPORT_INGRESS_IP"], "172.29.0.20")
-            self.assertNotIn("PASSPORT_TLS_CERTIFICATE_FILE", env)
-            self.assertNotIn("PASSPORT_TLS_PRIVATE_KEY_FILE", env)
-            self.assertEqual(install_state.install_env(
-                Path(tmp), "172.29.0.0/24", "", "192.168.1.40", 10001, 10001,
-                "lan", install_state.LAN_HTTP_PORT), env)
+        env = install_state.compose_env_values(Path("/srv/passport-runtime"), "172.29.0.0/24", "",
+                                               "192.168.1.40", 10001, 10001, "lan",
+                                               install_state.LAN_HTTP_PORT)
+        self.assertEqual(env["PASSPORT_PUBLIC_BIND"], "192.168.1.40")
+        self.assertEqual(env["PASSPORT_HTTP_PORT"], "8080")
+        self.assertEqual(env["PASSPORT_INGRESS_IP"], "172.29.0.20")
+        self.assertNotIn("PASSPORT_TLS_CERTIFICATE_FILE", env)
+        self.assertNotIn("PASSPORT_TLS_PRIVATE_KEY_FILE", env)
+
+
+class LanIngressBootstrapTests(unittest.TestCase):
+    def test_lan_image_uses_the_tls_free_managed_bootstrap(self) -> None:
+        dockerfile = (REPO_ROOT / "deploy/ingress/Dockerfile.lan").read_text()
+        entrypoint = (REPO_ROOT / "deploy/ingress/entrypoint-managed.sh").read_text()
+        caddyfile = (REPO_ROOT / "deploy/ingress/Caddyfile.lan").read_text()
+
+        self.assertIn("COPY entrypoint-managed.sh", dockerfile)
+        self.assertIn("exec su-exec", entrypoint)
+        self.assertIn("/run/passport-caddy", entrypoint)
+        self.assertNotIn("/run/secrets", entrypoint)
+        self.assertNotIn("tls.crt", entrypoint)
+        self.assertNotIn("tls.key", entrypoint)
+        self.assertIn("auto_https off", caddyfile)
+        self.assertNotIn("\n\ttls ", caddyfile)
 
 
 if __name__ == "__main__":

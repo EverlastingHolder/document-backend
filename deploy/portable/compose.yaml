@@ -1,0 +1,337 @@
+name: passport-backend
+
+services:
+  bootstrap:
+    image: passport-backend-init:portable-v1
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.deployment-init
+    restart: "no"
+    network_mode: none
+    environment:
+      PASSPORT_PRIVATE_SUBNET: ${PASSPORT_PRIVATE_SUBNET:-172.31.0.0/24}
+      PASSPORT_PRIVATE_DYNAMIC_POOL: ${PASSPORT_PRIVATE_DYNAMIC_POOL:-172.31.0.128/25}
+      PASSPORT_API_IP: ${PASSPORT_API_IP:-172.31.0.10}
+      PASSPORT_WORKER_IP: ${PASSPORT_WORKER_IP:-172.31.0.11}
+      PASSPORT_INGRESS_IP: ${PASSPORT_INGRESS_IP:-172.31.0.20}
+      PASSPORT_PUBLIC_BIND: ${PASSPORT_PUBLIC_BIND:-127.0.0.1}
+      PASSPORT_HTTP_PORT: "8080"
+    volumes:
+      - bootstrap_state:/bootstrap/state
+      - postgres_secrets:/bootstrap/postgres
+      - rabbitmq_secrets:/bootstrap/rabbitmq
+      - api_secrets:/bootstrap/api-secrets
+      - worker_secrets:/bootstrap/worker-secrets
+      - api_config:/bootstrap/api-config
+      - worker_config:/bootstrap/worker-config
+
+  postgres:
+    image: postgres:18.6-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: passport
+      POSTGRES_USER: passport
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+      - postgres_secrets:/run/secrets:ro
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - private
+
+  rabbitmq:
+    image: passport-backend-rabbitmq:portable-v1
+    build:
+      context: ../../deploy/rabbitmq
+      dockerfile: Dockerfile
+    hostname: passport-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: passport
+      PASSPORT_RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_password
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - rabbitmq_secrets:/run/secrets:ro
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+    networks:
+      - private
+
+  api-config-check:
+    image: passport-backend-api:portable-v1
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.api
+    entrypoint: ["/usr/local/bin/passport-api-entrypoint"]
+    command: ["--check-config"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PASSPORT_APP_UID: "10001"
+      PASSPORT_APP_GID: "10001"
+    volumes:
+      - api_config:/run/config:ro
+      - api_secrets:/run/secrets:ro
+    tmpfs:
+      - /run/passport-api:mode=0700,uid=10001,gid=10001,size=16m
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  worker-config-check:
+    image: passport-backend-ocr:portable-v1
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.ocr.portable
+    command: ["--check-config"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    environment:
+      PASSPORT_WORKER_UID: "10001"
+      PASSPORT_WORKER_GID: "10001"
+      PASSPORT_OCR_CONFIG_FILE: /run/config/ocr-worker.json
+    volumes:
+      - worker_config:/run/config:ro
+      - worker_secrets:/run/secrets:ro
+      - postgres_images:/var/lib/passport/images:ro
+    tmpfs:
+      - /run/passport-ocr:mode=0700,uid=10001,gid=10001,size=16m
+      - /var/lib/passport/ocr-work:mode=0700,uid=10001,gid=10001
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+
+  migrate:
+    image: passport-backend-migrate:portable-v1
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.migrate
+    restart: "no"
+    read_only: true
+    secrets: []
+    volumes:
+      - api_secrets:/run/secrets:ro
+    command:
+      - -dsn-file
+      - /run/secrets/postgres_dsn
+      - -connect-timeout
+      - 10s
+      - -migration-lock-timeout
+      - 15s
+      - -migration-timeout
+      - 60s
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      api-config-check:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - private
+
+  api:
+    image: passport-backend-api:portable-v1
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.api
+    read_only: true
+    init: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      api-config-check:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      PASSPORT_APP_UID: "10001"
+      PASSPORT_APP_GID: "10001"
+      PASSPORT_API_IP: ${PASSPORT_API_IP:-172.31.0.10}
+    volumes:
+      - api_config:/run/config:ro
+      - api_secrets:/run/secrets:ro
+      - postgres_images:/var/lib/passport/images
+      - api_state:/var/lib/passport/state
+    tmpfs:
+      - /run/passport-api:mode=0700,uid=10001,gid=10001,size=16m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://$${PASSPORT_API_IP}:8080/readyz"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 15s
+    networks:
+      private:
+        ipv4_address: ${PASSPORT_API_IP:-172.31.0.10}
+
+  ocr:
+    image: passport-backend-ocr:portable-v1
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.ocr.portable
+    read_only: true
+    init: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      bootstrap:
+        condition: service_completed_successfully
+      worker-config-check:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      PASSPORT_WORKER_UID: "10001"
+      PASSPORT_WORKER_GID: "10001"
+      PASSPORT_OCR_CONFIG_FILE: /run/config/ocr-worker.json
+    volumes:
+      - worker_config:/run/config:ro
+      - worker_secrets:/run/secrets:ro
+      - postgres_images:/var/lib/passport/images:ro
+    tmpfs:
+      - /run/passport-ocr:mode=0700,uid=10001,gid=10001,size=16m
+      - /var/lib/passport/ocr-work:mode=0700,uid=10001,gid=10001
+    healthcheck:
+      test: ["CMD", "python", "/app/ocr/runtime/secret_bootstrap.py", "healthcheck", "/run/passport-ocr/worker-config.json"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10m
+    networks:
+      private:
+        ipv4_address: ${PASSPORT_WORKER_IP:-172.31.0.11}
+
+  caddy:
+    image: passport-backend-ingress-lan:portable-v1
+    build:
+      context: ../../deploy/ingress
+      dockerfile: Dockerfile.lan
+    read_only: true
+    init: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PASSPORT_CADDY_UID: "10001"
+      PASSPORT_CADDY_GID: "10001"
+    ports:
+      - "${PASSPORT_PUBLIC_BIND:-127.0.0.1}:8080:8080"
+    tmpfs:
+      - /run/passport-caddy:mode=0700,uid=10001,gid=10001,size=1m
+      - /data:mode=0700,uid=10001,gid=10001,size=16m
+      - /config:mode=0700,uid=10001,gid=10001,size=1m
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 && wget -q -T 3 -O /dev/null http://api:8080/readyz"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 10s
+    networks:
+      egress:
+        gw_priority: 1
+      private:
+        ipv4_address: ${PASSPORT_INGRESS_IP:-172.31.0.20}
+
+  job-maintenance:
+    profiles: [ops]
+    image: passport-backend-ops:portable-v1
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.ops
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    environment:
+      PASSPORT_OPS_UID: "10001"
+      PASSPORT_OPS_GID: "10001"
+      PASSPORT_MAINTENANCE_API_STOPPED: ${PASSPORT_MAINTENANCE_API_STOPPED:-false}
+      PASSPORT_MAINTENANCE_DSN_FILE: /run/passport-ops/postgres_dsn
+      PASSPORT_IMAGE_ROOT: /var/lib/passport/images
+      PASSPORT_MAX_UPLOAD_BYTES: 8388608
+      PASSPORT_MAX_STORED_IMAGE_BYTES: 10737418240
+      PASSPORT_MAINTENANCE_CONNECT_TIMEOUT: 10s
+      PASSPORT_MAINTENANCE_LOCK_TIMEOUT: 15s
+      PASSPORT_MAINTENANCE_OPERATION_TIMEOUT: 30s
+      PASSPORT_RETENTION_CLAIM_LEASE: 1m
+      PASSPORT_RETENTION_INTERVAL: 1s
+      PASSPORT_RETENTION_BATCH_SIZE: 100
+    volumes:
+      - api_secrets:/run/secrets:ro
+      - postgres_images:/var/lib/passport/images
+    tmpfs:
+      - /run/passport-ops:mode=0700,uid=10001,gid=10001,size=1m
+    command: ["job-maintenance", "sweep"]
+    networks:
+      - private
+
+volumes:
+  bootstrap_state:
+  postgres_secrets:
+  rabbitmq_secrets:
+  api_secrets:
+  worker_secrets:
+  api_config:
+  worker_config:
+  postgres_data:
+  rabbitmq_data:
+  postgres_images:
+  api_state:
+
+networks:
+  private:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${PASSPORT_PRIVATE_SUBNET:-172.31.0.0/24}
+          ip_range: ${PASSPORT_PRIVATE_DYNAMIC_POOL:-172.31.0.128/25}
+  egress:
+    driver: bridge

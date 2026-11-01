@@ -2,6 +2,30 @@
 
 Backend для Android-приложения распознавания российского паспорта. Go API владеет публичным контрактом и каноническим результатом. Синхронный endpoint использует приватный RussianDocsOCR child process; async jobs используют отдельный Python RabbitMQ consumer через private Go worker API. Python services не публикуют публичный порт и не имеют PostgreSQL credentials. Все 11 полей остаются предложениями для ручной проверки. Качество на независимых документах и Android-доступ с другой машины не подтверждены.
 
+## Локальный Docker quickstart
+
+Клонируйте код и из каталога portable Compose соберите и запустите сервисы одной командой:
+
+```sh
+git clone https://github.com/EverlastingHolder/document-backend.git
+cd document-backend/deploy/portable
+docker compose up -d --build
+```
+
+Образы Go API и OCR собираются локально; registry login не требуется. OCR build получает закреплённый RussianDocsOCR source/model snapshot из публичного upstream и проверяет модели по lock manifest. Первый build требует сети и скачивает модели. По умолчанию HTTP доступен локально по `http://127.0.0.1:8080`.
+
+Чтобы открыть endpoint на LAN, скопируйте `.env.example` рядом с Compose-файлом и задайте в локальном, не добавляемом в Git `.env` адрес своего сервера:
+
+```sh
+cp .env.example .env
+# Set PASSPORT_PUBLIC_BIND=192.168.1.100 in .env
+docker compose up -d --build
+```
+
+Замените пример на частный IPv4-адрес сервера. Ограничьте входящий TCP 8080 межсетевым экраном только нужным LAN. Windows Firewall должен разрешать порт только из частной сети и доверенного диапазона клиентов. URL для debug APK будет `http://192.168.1.100:8080`; текущая release-сборка Android требует HTTPS. Compose/WSL2 LAN-forwarding пока отдельно не проверен; эти инструкции не заявляют его полной поддержку.
+
+Полные параметры, stop/status команды и границы проверки: [portable deployment README](deploy/portable/README.md).
+
 Приватные OCR research outputs, изображения, диагностические материалы и веса моделей не публикуются в Git; связанные локальные отчёты отсутствуют в этом репозитории.
 
 `cmd/api` пишет privacy-filtered JSON operational logs и отдельно сохраняет bounded cumulative statistics в приватный локальный state file. `GET /v1/stats` использует ту же прямую peer CIDR ACL, что и распознавание. Snapshot содержит только агрегаты HTTP/OCR/stages, без request history, request IDs, images, OCR text или PII. HTTP request ID по-прежнему связывает operational log request, OCR job и child-stage события; statistics requests не добавляются в HTTP counters. Подробности и границы проверок: [logging и runtime runbook](docs/OCR_API_RUNTIME.md).

@@ -136,3 +136,4 @@ Database-enrolled client credentials are revoked with `cmd/client-admin revoke`;
 - Продолжительность и вид failure retry/backoff будут выбраны из наблюдаемой длительности настоящего OCR и требований продукта; план не задаёт чисел.
 - Backup/restore оператора и доступность после полной потери single host; multi-host HA не входит в целевой объём.
 - Порядок полного удаления старого sync endpoint должен совпасть с Android rollout; автоматическая смена его `200` на `202` исключена.
+

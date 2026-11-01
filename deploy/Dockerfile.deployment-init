@@ -1,0 +1,15 @@
+FROM golang:1.27.3-alpine3.24 AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY internal/clientauth ./internal/clientauth
+COPY internal/jsonstrict ./internal/jsonstrict
+COPY cmd/deployment-init ./cmd/deployment-init
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/passport-deployment-init ./cmd/deployment-init
+
+FROM scratch
+COPY --from=build /out/passport-deployment-init /passport-deployment-init
+USER 0:0
+ENTRYPOINT ["/passport-deployment-init"]

@@ -1,0 +1,66 @@
+FROM python:3.12.16-slim-bookworm AS assets
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tools
+COPY scripts/build-linux-deployment-kit.py ./build-linux-deployment-kit.py
+COPY scripts/fetch_portable_ocr_assets.py ./fetch_portable_ocr_assets.py
+
+RUN git clone --quiet --depth=1 --branch v4.10.0 \
+      https://github.com/protei300/RussianDocsOCR.git /tmp/RussianDocsOCR \
+    && test "$(git -C /tmp/RussianDocsOCR rev-parse HEAD)" = \
+      8ea541f39209ef1e30e680204366041fcfdb0c84 \
+    && mkdir -p /tmp/model-root/document_processing \
+    && RDOCS_MODELS_ROOT=/tmp/model-root python3 /tmp/RussianDocsOCR/scripts/fetch_models.py >/dev/null 2>&1 \
+    || { echo "pinned_ocr_source_or_model_fetch_failed" >&2; exit 1; }
+
+RUN mkdir -p /out \
+    && python3 /tools/fetch_portable_ocr_assets.py \
+      --source-root /tmp/RussianDocsOCR \
+      --models-root /tmp/model-root/document_processing/models \
+      --output-root /out/portable-assets
+
+FROM python:3.12.16-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONPATH=/opt/russiandocs
+
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY ocr/requirements-worker.txt /tmp/requirements-worker.txt
+RUN python -m pip install --no-cache-dir -r /tmp/requirements-worker.txt \
+    && rm -f /tmp/requirements-worker.txt
+
+COPY ocr/runtime/async_consumer.py /app/ocr/runtime/async_consumer.py
+COPY ocr/runtime/russiandocs_worker.py /app/ocr/runtime/russiandocs_worker.py
+COPY ocr/runtime/secret_bootstrap.py /app/ocr/runtime/secret_bootstrap.py
+COPY deploy/ocr/entrypoint.sh /usr/local/bin/passport-ocr-entrypoint
+COPY --from=assets /out/portable-assets/russiandocs/ /opt/russiandocs/
+COPY --from=assets /out/portable-assets/models/ /opt/passport-models/
+COPY --from=assets /out/portable-assets/portable-assets.json /opt/portable-assets.json
+
+USER 0:0
+RUN chmod 0555 /usr/local/bin/passport-ocr-entrypoint \
+    && mkdir -p /var/lib/passport/ocr-work \
+    && chown 10001:10001 /var/lib/passport/ocr-work \
+    && chmod 0700 /var/lib/passport/ocr-work
+
+LABEL org.opencontainers.image.title="Passport OCR worker (portable assets)" \
+      org.opencontainers.image.source="https://github.com/EverlastingHolder/document-backend" \
+      org.opencontainers.image.version="portable-v1" \
+      io.passport.russiandocs.source-commit="8ea541f39209ef1e30e680204366041fcfdb0c84" \
+      io.passport.russiandocs.source-version="4.10.0" \
+      io.passport.russiandocs.models-version="v11"
+
+ENTRYPOINT ["/usr/local/bin/passport-ocr-entrypoint"]

@@ -1,0 +1,16 @@
+# Only the Dockerfile, asset-verification tooling, and Python worker runtime are
+# sent as build context. RussianDocsOCR and model files are fetched in the
+# network-enabled asset stage from immutable public versions and hash-checked.
+**
+!scripts/
+!scripts/build-linux-deployment-kit.py
+!scripts/fetch_portable_ocr_assets.py
+!ocr/
+!ocr/requirements-worker.txt
+!ocr/runtime/
+!ocr/runtime/async_consumer.py
+!ocr/runtime/russiandocs_worker.py
+!ocr/runtime/secret_bootstrap.py
+!deploy/
+!deploy/ocr/
+!deploy/ocr/entrypoint.sh
