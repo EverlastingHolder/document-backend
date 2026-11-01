@@ -148,7 +148,7 @@ func testOptions(t *testing.T) options {
 	t.Helper()
 	base := t.TempDir()
 	roots := map[string]string{}
-	for _, name := range []string{"state", "postgres", "rabbitmq", "api_secrets", "worker_secrets", "api_config", "worker_config"} {
+	for _, name := range []string{"state", "postgres", "rabbitmq", "api_secrets", "worker_secrets", "api_config", "worker_config", "images", "api_state"} {
 		path := filepath.Join(base, name)
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatal("create bootstrap volume fixture")
@@ -159,7 +159,7 @@ func testOptions(t *testing.T) options {
 	return options{
 		Topology: topology{
 			PrivateSubnet: "172.31.0.0/24", DynamicPool: "172.31.0.128/25", APIIP: "172.31.0.10", WorkerIP: "172.31.0.11",
-			IngressIP: "172.31.0.20", PublicBind: "127.0.0.1", HTTPPort: 8080, AppUID: appUID, AppGID: appGID,
+			IngressIP: "172.31.0.20", PublicBind: "127.0.0.1", HTTPPort: 8080, AppUID: owner.UID, AppGID: owner.GID,
 		},
 		Roots: roots, PostgresOwner: owner, RabbitOwner: owner, RuntimeOwner: owner,
 	}

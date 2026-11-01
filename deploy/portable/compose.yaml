@@ -24,6 +24,8 @@ services:
       - worker_secrets:/bootstrap/worker-secrets
       - api_config:/bootstrap/api-config
       - worker_config:/bootstrap/worker-config
+      - image_data:/bootstrap/images
+      - api_state:/bootstrap/api-state
 
   postgres:
     image: postgres:18.6-alpine3.24
@@ -119,7 +121,7 @@ services:
     volumes:
       - worker_config:/run/config:ro
       - worker_secrets:/run/secrets:ro
-      - postgres_images:/var/lib/passport/images:ro
+      - image_data:/var/lib/passport/images:ro
     tmpfs:
       - /run/passport-ocr:mode=0700,uid=10001,gid=10001,size=16m
       - /var/lib/passport/ocr-work:mode=0700,uid=10001,gid=10001
@@ -186,7 +188,7 @@ services:
     volumes:
       - api_config:/run/config:ro
       - api_secrets:/run/secrets:ro
-      - postgres_images:/var/lib/passport/images
+      - image_data:/var/lib/passport/images
       - api_state:/var/lib/passport/state
     tmpfs:
       - /run/passport-api:mode=0700,uid=10001,gid=10001,size=16m
@@ -228,7 +230,7 @@ services:
     volumes:
       - worker_config:/run/config:ro
       - worker_secrets:/run/secrets:ro
-      - postgres_images:/var/lib/passport/images:ro
+      - image_data:/var/lib/passport/images:ro
     tmpfs:
       - /run/passport-ocr:mode=0700,uid=10001,gid=10001,size=16m
       - /var/lib/passport/ocr-work:mode=0700,uid=10001,gid=10001
@@ -306,7 +308,7 @@ services:
       PASSPORT_RETENTION_BATCH_SIZE: 100
     volumes:
       - api_secrets:/run/secrets:ro
-      - postgres_images:/var/lib/passport/images
+      - image_data:/var/lib/passport/images
     tmpfs:
       - /run/passport-ops:mode=0700,uid=10001,gid=10001,size=1m
     command: ["job-maintenance", "sweep"]
@@ -323,7 +325,7 @@ volumes:
   worker_config:
   postgres_data:
   rabbitmq_data:
-  postgres_images:
+  image_data:
   api_state:
 
 networks:

@@ -170,6 +170,12 @@ func initializeAt(opts options) error {
 		"api_config": opts.RuntimeOwner, "worker_config": opts.RuntimeOwner,
 	}
 	for name, root := range opts.Roots {
+		if name == "images" || name == "api_state" {
+			if root == "" {
+				return errors.New("invalid data volume")
+			}
+			continue
+		}
 		if _, ok := allowed[name]; !ok || root == "" {
 			return errors.New("invalid bootstrap volume")
 		}
@@ -178,10 +184,8 @@ func initializeAt(opts options) error {
 			return err
 		}
 	}
-	if len(opts.Roots) != len(allowed) {
-		if len(opts.Roots) != len(allowed)+2 {
-			return errors.New("incomplete bootstrap volumes")
-		}
+	if len(opts.Roots) != len(allowed)+2 {
+		return errors.New("incomplete bootstrap volumes")
 	}
 	if opts.Roots["images"] == "" || opts.Roots["api_state"] == "" {
 		return errors.New("incomplete data volumes")
