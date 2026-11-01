@@ -25,6 +25,14 @@ machine's private IPv4 address for both the initial start and later Compose
 commands. The Compose file does not inspect host interfaces or publish the
 API, PostgreSQL, or RabbitMQ ports.
 
+Swagger UI is available separately at `http://127.0.0.1:8081`. It reads the
+checked-in OpenAPI file through a read-only mount and receives no application
+secrets. The docs listener remains loopback-bound when the API is exposed to
+the LAN. Set `PASSPORT_DOCS_BIND` to the host's private IPv4 only if the UI
+also needs LAN access, and restrict TCP 8081 in the firewall. Its `Try it out`
+requests use Caddy's existing API route allowlist; unknown `/v1` routes remain
+404. Do not expose the documentation listener to untrusted networks.
+
 For example:
 
 ```sh
