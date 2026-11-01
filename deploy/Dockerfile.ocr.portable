@@ -39,7 +39,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY ocr/requirements-worker.txt /tmp/requirements-worker.txt
-RUN python -m pip install --no-cache-dir -r /tmp/requirements-worker.txt \
+RUN python -m pip install --no-cache-dir --root-user-action=ignore -r /tmp/requirements-worker.txt \
     && rm -f /tmp/requirements-worker.txt
 
 COPY ocr/runtime/async_consumer.py /app/ocr/runtime/async_consumer.py
