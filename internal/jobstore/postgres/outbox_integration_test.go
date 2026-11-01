@@ -136,6 +136,40 @@ func TestPostgresTerminalTransitionsClampFutureTimestamps(t *testing.T) {
 		assertTerminalTimestamps(t, submission.JobID, string(jobs.StatusFailed), true)
 	})
 
+	t.Run("retry preserves future started timestamp invariant", func(t *testing.T) {
+		retryService, err := jobexecution.New(store, jobexecution.Config{
+			PipelineVersion: "integration-retry-clock-v1", LeaseDuration: 2 * time.Hour,
+			ProcessingTimeout: time.Hour, CompletionBudget: 30 * time.Minute,
+			RetryPolicy: jobs.RetryPolicy{MaxAttempts: 2, InitialBackoff: time.Second, MaxBackoff: time.Second},
+		})
+		if err != nil {
+			t.Fatalf("construct retry service: %v", err)
+		}
+		submission := newFixture(t, "retry-clock")
+		envelope := jobs.Envelope{SchemaVersion: 1, EventID: submission.EventID, JobID: submission.JobID, AttemptNo: 1}
+		claim, err := retryService.Claim(ctx, envelope)
+		if err != nil || claim.Execution == nil {
+			t.Fatalf("claim = (%+v, %v)", claim, err)
+		}
+		setFutureJobStart(t, submission.JobID, true)
+		decision, err := retryService.Fail(ctx, jobs.Failure{
+			Envelope: envelope, AttemptToken: claim.Execution.AttemptToken, ErrorCode: "processing_failed",
+		})
+		if err != nil || decision != jobs.DecisionAck {
+			t.Fatalf("retryable Fail = (%q, %v), want durable ACK", decision, err)
+		}
+		var state string
+		var started, updated time.Time
+		if err := pool.QueryRow(ctx, `SELECT state, started_at, updated_at FROM jobs WHERE job_id=$1`, submission.JobID).
+			Scan(&state, &started, &updated); err != nil {
+			t.Fatalf("read retry-scheduled job: %v", err)
+		}
+		if state != string(jobs.StatusQueued) || updated.Before(started) {
+			t.Fatalf("retry state=%s updated_at>=started_at=%t, want queued with preserved timestamp invariant", state, !updated.Before(started))
+		}
+		assertLifecycleCounts(t, ctx, pool, submission.JobID, 1, 2)
+	})
+
 	t.Run("known queued poison clamps terminal job timestamp", func(t *testing.T) {
 		submission := newFixture(t, "rejected")
 		setFutureJobStart(t, submission.JobID, false)

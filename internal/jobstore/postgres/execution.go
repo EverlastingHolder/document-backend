@@ -632,7 +632,7 @@ func retryOrFinishAttempt(ctx context.Context, tx pgx.Tx, jobID string, attemptC
 	availableAt := now.Add(backoff)
 	if err := execExactlyOne(ctx, tx, `
 		UPDATE jobs SET state='queued', error_code=NULL, result=NULL, finished_at=NULL,
-			available_at=$2, updated_at=clock_timestamp()
+			available_at=$2, updated_at=GREATEST(clock_timestamp(), created_at, updated_at, started_at)
 		WHERE job_id=$1 AND state='processing' AND attempt_count=$3`, jobID, availableAt, attemptNo); err != nil {
 		return err
 	}
