@@ -1,0 +1,52 @@
+services:
+  caddy:
+    profiles: [queue]
+    build:
+      context: ./deploy/ingress
+      dockerfile: Dockerfile
+    image: passport-backend-ingress:2.11.7
+    read_only: true
+    init: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      PASSPORT_TLS_DOMAIN: ${PASSPORT_TLS_DOMAIN:?Set PASSPORT_TLS_DOMAIN to the certificate hostname}
+      PASSPORT_CADDY_UID: ${PASSPORT_CADDY_UID:-10001}
+      PASSPORT_CADDY_GID: ${PASSPORT_CADDY_GID:-10001}
+    ports:
+      - "${PASSPORT_PUBLIC_BIND:?Set PASSPORT_PUBLIC_BIND to the intended host interface}:80:8080"
+      - "${PASSPORT_PUBLIC_BIND:?Set PASSPORT_PUBLIC_BIND to the intended host interface}:443:8443"
+    tmpfs:
+      - /run/passport-caddy:mode=0700,uid=${PASSPORT_CADDY_UID:-10001},gid=${PASSPORT_CADDY_GID:-10001},size=1m
+      - /data:mode=0700,uid=${PASSPORT_CADDY_UID:-10001},gid=${PASSPORT_CADDY_GID:-10001},size=16m
+      - /config:mode=0700,uid=${PASSPORT_CADDY_UID:-10001},gid=${PASSPORT_CADDY_GID:-10001},size=1m
+    secrets:
+      - ingress_tls_certificate
+      - ingress_tls_private_key
+    healthcheck:
+      test: ["CMD-SHELL", "kill -0 1 && wget -q -T 3 -O /dev/null http://api:8080/readyz"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+      start_period: 10s
+    networks:
+      egress:
+        gw_priority: 1
+      private:
+        ipv4_address: ${PASSPORT_INGRESS_IP:-172.30.0.20}
+
+secrets:
+  ingress_tls_certificate:
+    file: ${PASSPORT_TLS_CERTIFICATE_FILE:?Set PASSPORT_TLS_CERTIFICATE_FILE to a private certificate-chain file}
+  ingress_tls_private_key:
+    file: ${PASSPORT_TLS_PRIVATE_KEY_FILE:?Set PASSPORT_TLS_PRIVATE_KEY_FILE to a private TLS key file}
+
+networks:
+  egress:
+    driver: bridge

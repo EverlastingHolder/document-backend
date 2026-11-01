@@ -434,7 +434,7 @@ func attrAllowed(key string, value slog.Value) bool {
 	case "service":
 		return value.String() == "passport-api"
 	case "component":
-		return value.Kind() == slog.KindString && oneOf(value.String(), "api", "httpapi", "server", "ocr", "worker", "runtime", "startup")
+		return value.Kind() == slog.KindString && oneOf(value.String(), "api", "httpapi", "workerapi", "server", "ocr", "worker", "job_recovery", "outbox", "runtime", "startup")
 	case "event":
 		return value.Kind() == slog.KindString && eventAllowed(value.String())
 	case "request_id":
@@ -442,13 +442,13 @@ func attrAllowed(key string, value slog.Value) bool {
 	case "method":
 		return value.Kind() == slog.KindString && oneOf(value.String(), "GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "OTHER")
 	case "route":
-		return value.Kind() == slog.KindString && oneOf(value.String(), "/v1/passport/recognize", "/v1/stats", "unmatched")
+		return value.Kind() == slog.KindString && oneOf(value.String(), "/v1/passport/recognize", "/v1/passport/jobs", "/v1/passport/jobs/{job_id}", "/v1/client-installations", "/v1/stats", "/internal/worker/v1/claim", "/internal/worker/v1/complete", "/internal/worker/v1/fail", "/internal/worker/v1/reject", "unmatched")
 	case "status":
 		return value.Kind() == slog.KindInt64 && value.Int64() >= 0 && value.Int64() <= 599
 	case "duration_ms", "response_bytes", "phase_ms":
 		return value.Kind() == slog.KindInt64 && value.Int64() >= 0
 	case "error_code":
-		return value.Kind() == slog.KindString && oneOf(value.String(), "invalid_request", "access_denied", "upload_too_large", "unsupported_media_type", "image_unprocessable", "concurrency_limit_reached", "processing_failed", "ocr_unavailable", "processing_timeout", "not_found", "method_not_allowed", "statistics_unavailable", "metrics_write_failed", "internal_panic", "request_aborted", "startup_failed", "shutdown_failed", "worker_protocol_failed", "worker_failed", "worker_unavailable", "write_failed", "ok", "deadline_exceeded", "runtime_unavailable", "pipeline_failed", "cancelled", "invalid_image", "invalid_event")
+		return value.Kind() == slog.KindString && oneOf(value.String(), "invalid_request", "access_denied", "unauthorized", "idempotency_conflict", "job_acceptance_unavailable", "job_status_unavailable", "client_registration_unavailable", "registration_rate_limited", "worker_invalid_request", "worker_unauthorized", "worker_payload_too_large", "worker_storage_unavailable", "worker_completion_conflict", "worker_protocol_error", "job_storage_unavailable", "outbox_unavailable", "outbox_topology_mismatch", "outbox_authentication_rejected", "outbox_invalid_config", "broker_connection_restored", "upload_too_large", "unsupported_media_type", "image_unprocessable", "concurrency_limit_reached", "processing_failed", "ocr_unavailable", "processing_timeout", "not_found", "method_not_allowed", "statistics_unavailable", "metrics_write_failed", "internal_panic", "request_aborted", "startup_failed", "shutdown_failed", "worker_protocol_failed", "worker_failed", "worker_unavailable", "write_failed", "ok", "deadline_exceeded", "runtime_unavailable", "pipeline_failed", "cancelled", "invalid_image", "invalid_event")
 	case "phase":
 		return value.Kind() == slog.KindString && oneOf(value.String(), "image_validation", "ocr", "baseline_and_plan", "vl", "final_extraction", "cleanup", "worker_launch", "status_validation")
 	case "stage":
@@ -477,7 +477,7 @@ func eventFrom(message string, attrs []slog.Attr) string {
 }
 
 func eventAllowed(value string) bool {
-	return oneOf(value, "service.started", "service.stopping", "service.stopped", "service.failed", "logging.failed", "logging.rejected", "http.request.completed", "http.request.panic", "ocr.job.started", "ocr.job.completed", "ocr.job.failed", "ocr.stage.started", "ocr.stage.completed", "ocr.stage.failed", "ocr.telemetry.rejected", "metrics.persist.failed")
+	return oneOf(value, "service.started", "service.stopping", "service.stopped", "service.failed", "logging.failed", "logging.rejected", "http.request.completed", "http.request.panic", "worker.request.completed", "job.recovery.failed", "outbox.unavailable", "outbox.topology_mismatch", "outbox.authentication_rejected", "outbox.invalid_config", "outbox.reconnected", "job.image.cleanup.failed", "ocr.job.started", "ocr.job.completed", "ocr.job.failed", "ocr.stage.started", "ocr.stage.completed", "ocr.stage.failed", "ocr.telemetry.rejected", "metrics.persist.failed")
 }
 
 func oneOf(value string, options ...string) bool {

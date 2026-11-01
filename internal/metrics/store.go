@@ -28,7 +28,9 @@ var (
 	ErrCounterOverflow    = errors.New("metrics counter overflow")
 	ErrClosed             = errors.New("metrics store closed")
 	durationBoundaries    = [...]uint64{10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000, 60000, 120000, 300000, 600000, 86400000}
-	statusCodes           = [...]string{"0", "200", "400", "403", "404", "405", "413", "415", "422", "429", "500", "503", "504"}
+	legacyStatusCodes     = [...]string{"0", "200", "400", "403", "404", "405", "413", "415", "422", "429", "500", "503", "504"}
+	previousStatusCodes   = [...]string{"0", "200", "202", "400", "401", "403", "404", "405", "409", "413", "415", "422", "429", "500", "503", "504"}
+	statusCodes           = [...]string{"0", "200", "201", "202", "400", "401", "403", "404", "405", "409", "413", "415", "422", "429", "500", "503", "504"}
 	errorCodes            = [...]string{"image_unprocessable", "runtime_unavailable", "deadline_exceeded", "cancelled", "pipeline_failed", "processing_failed"}
 	stageNames            = [...]string{"ocr", "baseline", "vl", "extract"}
 )
@@ -145,9 +147,16 @@ func Open(config Config) (*Store, error) {
 			_ = store.releaseLock()
 			return nil, errors.New("metrics state unavailable")
 		}
-		if decodeErr := decodeSnapshot(contents, config.PipelineVersion, &store.snapshot); decodeErr != nil {
+		upgraded, decodeErr := decodeSnapshot(contents, config.PipelineVersion, &store.snapshot)
+		if decodeErr != nil {
 			_ = store.releaseLock()
 			return nil, errors.New("metrics state invalid")
+		}
+		if upgraded {
+			if persistErr := store.persistLocked(store.snapshot); persistErr != nil {
+				_ = store.releaseLock()
+				return nil, errors.New("metrics state upgrade failed")
+			}
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		_ = store.releaseLock()
@@ -462,107 +471,132 @@ func contains(values []string, value string) bool {
 	return false
 }
 
-func decodeSnapshot(data []byte, pipeline string, snapshot *Snapshot) error {
+func decodeSnapshot(data []byte, pipeline string, snapshot *Snapshot) (bool, error) {
 	if len(data) == 0 || len(data) > maxStateBytes || duplicateKeys(data) != nil {
-		return errors.New("invalid metrics snapshot")
+		return false, errors.New("invalid metrics snapshot")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(snapshot); err != nil {
-		return err
+		return false, err
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); err != io.EOF {
-		return errors.New("trailing metrics snapshot data")
+		return false, errors.New("trailing metrics snapshot data")
 	}
 	if snapshot.SchemaVersion != schemaVersion || snapshot.PipelineVersion != pipeline || snapshot.Since.IsZero() || snapshot.UpdatedAt.IsZero() || snapshot.Persistence.ErrorCode != "" || !snapshot.Persistence.Healthy {
-		return errors.New("metrics snapshot metadata mismatch")
+		return false, errors.New("metrics snapshot metadata mismatch")
 	}
-	if len(snapshot.HTTP.ByStatus) != len(statusCodes) || len(snapshot.OCR.ByErrorCode) != len(errorCodes) || len(snapshot.Stages) != len(stageNames) {
-		return errors.New("metrics snapshot cardinality mismatch")
+	upgraded := false
+	if len(snapshot.HTTP.ByStatus) == len(legacyStatusCodes) || len(snapshot.HTTP.ByStatus) == len(previousStatusCodes) {
+		known := legacyStatusCodes[:]
+		if len(snapshot.HTTP.ByStatus) == len(previousStatusCodes) {
+			known = previousStatusCodes[:]
+		}
+		for _, key := range known {
+			if _, ok := snapshot.HTTP.ByStatus[key]; !ok {
+				return false, errors.New("metrics status missing")
+			}
+		}
+		for key := range snapshot.HTTP.ByStatus {
+			if !contains(known, key) {
+				return false, errors.New("metrics status unknown")
+			}
+		}
+		for _, key := range statusCodes {
+			if _, ok := snapshot.HTTP.ByStatus[key]; !ok {
+				snapshot.HTTP.ByStatus[key] = 0
+			}
+		}
+		upgraded = true
+	} else if len(snapshot.HTTP.ByStatus) != len(statusCodes) {
+		return false, errors.New("metrics snapshot cardinality mismatch")
+	}
+	if len(snapshot.OCR.ByErrorCode) != len(errorCodes) || len(snapshot.Stages) != len(stageNames) {
+		return false, errors.New("metrics snapshot cardinality mismatch")
 	}
 	for _, key := range statusCodes {
 		if _, ok := snapshot.HTTP.ByStatus[key]; !ok {
-			return errors.New("metrics status missing")
+			return false, errors.New("metrics status missing")
 		}
 	}
 	for key := range snapshot.HTTP.ByStatus {
 		if !contains(statusCodes[:], key) {
-			return errors.New("metrics status unknown")
+			return false, errors.New("metrics status unknown")
 		}
 	}
 	for _, key := range errorCodes {
 		if _, ok := snapshot.OCR.ByErrorCode[key]; !ok {
-			return errors.New("metrics error code missing")
+			return false, errors.New("metrics error code missing")
 		}
 	}
 	for key := range snapshot.OCR.ByErrorCode {
 		if !contains(errorCodes[:], key) {
-			return errors.New("metrics error code unknown")
+			return false, errors.New("metrics error code unknown")
 		}
 	}
 	for _, key := range stageNames {
 		if _, ok := snapshot.Stages[key]; !ok {
-			return errors.New("metrics stage missing")
+			return false, errors.New("metrics stage missing")
 		}
 	}
 	for key := range snapshot.Stages {
 		if !contains(stageNames[:], key) {
-			return errors.New("metrics stage unknown")
+			return false, errors.New("metrics stage unknown")
 		}
 	}
 	if snapshot.HTTP.Errors > snapshot.HTTP.Total || snapshot.OCR.Completed > snapshot.OCR.Total || snapshot.OCR.Failed != snapshot.OCR.Total-snapshot.OCR.Completed {
-		return errors.New("metrics counter invariant failed")
+		return false, errors.New("metrics counter invariant failed")
 	}
 	var httpStatusTotal uint64
 	var httpErrorTotal uint64
 	for key, count := range snapshot.HTTP.ByStatus {
 		status, err := strconv.Atoi(key)
 		if err != nil {
-			return errors.New("metrics status invalid")
+			return false, errors.New("metrics status invalid")
 		}
 		if math.MaxUint64-httpStatusTotal < count {
-			return errors.New("metrics status overflow")
+			return false, errors.New("metrics status overflow")
 		}
 		httpStatusTotal += count
 		if status >= 400 {
 			if math.MaxUint64-httpErrorTotal < count {
-				return errors.New("metrics error overflow")
+				return false, errors.New("metrics error overflow")
 			}
 			httpErrorTotal += count
 		}
 	}
 	if httpStatusTotal != snapshot.HTTP.Total || httpErrorTotal != snapshot.HTTP.Errors {
-		return errors.New("metrics status total mismatch")
+		return false, errors.New("metrics status total mismatch")
 	}
 	var errorTotal uint64
 	for _, count := range snapshot.OCR.ByErrorCode {
 		if math.MaxUint64-errorTotal < count {
-			return errors.New("metrics error overflow")
+			return false, errors.New("metrics error overflow")
 		}
 		errorTotal += count
 	}
 	if errorTotal != snapshot.OCR.Failed {
-		return errors.New("metrics error total mismatch")
+		return false, errors.New("metrics error total mismatch")
 	}
 	if err := validateHistogram(snapshot.HTTP.Duration); err != nil {
-		return err
+		return false, err
 	}
 	if err := validateHistogram(snapshot.OCR.Duration); err != nil {
-		return err
+		return false, err
 	}
 	for _, stats := range snapshot.Stages {
 		if stats.Completed > math.MaxUint64-stats.Failed || stats.Completed+stats.Failed != stats.Duration.Count {
-			return errors.New("metrics stage invariant failed")
+			return false, errors.New("metrics stage invariant failed")
 		}
 		if err := validateHistogram(stats.Duration); err != nil {
-			return err
+			return false, err
 		}
 	}
 	if snapshot.HTTP.Duration.Count != snapshot.HTTP.Total || snapshot.OCR.Duration.Count != snapshot.OCR.Total {
-		return errors.New("metrics histogram invariant failed")
+		return false, errors.New("metrics histogram invariant failed")
 	}
-	return nil
+	return upgraded, nil
 }
 
 func validateHistogram(hist Histogram) error {

@@ -44,3 +44,8 @@ secrets/
 !/AGENTS.md
 !/docs/
 !/docs/**
+
+# Private OCR research artifacts and local preparation files are not published
+/outputs/
+/.tmp/
+/serial-roi-preview

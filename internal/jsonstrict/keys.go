@@ -43,7 +43,6 @@ func scanValue(decoder *json.Decoder) error {
 	default:
 		return errors.New("unexpected JSON delimiter")
 	}
-	return nil
 }
 
 func scanObject(decoder *json.Decoder) error {

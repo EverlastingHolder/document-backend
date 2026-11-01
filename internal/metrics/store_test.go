@@ -138,6 +138,119 @@ func TestOpenRejectsCorruptStateAndPipelineMismatch(t *testing.T) {
 	}
 }
 
+func TestOpenUpgradesLegacyHTTPStatusBucketsAdditively(t *testing.T) {
+	config := testConfig(t)
+	store, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ObserveHTTP(200, time.Millisecond, 12); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]any
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	httpStats := legacy["http"].(map[string]any)
+	byStatus := httpStats["by_status"].(map[string]any)
+	delete(byStatus, "201")
+	delete(byStatus, "202")
+	delete(byStatus, "401")
+	delete(byStatus, "409")
+	legacyData, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.Path, legacyData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(config)
+	if err != nil {
+		t.Fatalf("Open() rejected legacy fixed buckets: %v", err)
+	}
+	if got := store.Snapshot(); got.HTTP.ByStatus["200"] != 1 || got.HTTP.ByStatus["202"] != 0 || got.HTTP.ByStatus["401"] != 0 || got.HTTP.ByStatus["409"] != 0 {
+		t.Fatalf("upgraded HTTP buckets=%v", got.HTTP.ByStatus)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot Snapshot
+	if err := json.Unmarshal(persisted, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.HTTP.ByStatus) != len(statusCodes) {
+		t.Fatalf("upgraded snapshot has %d status buckets, want %d", len(snapshot.HTTP.ByStatus), len(statusCodes))
+	}
+}
+
+func TestOpenAddsClientRegistrationBucketToPreviousSnapshot(t *testing.T) {
+	config := testConfig(t)
+	store, err := Open(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot map[string]any
+	contents, err := os.ReadFile(config.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(contents, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	httpStats := snapshot["http"].(map[string]any)
+	byStatus := httpStats["by_status"].(map[string]any)
+	delete(byStatus, "201")
+	previous, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config.Path, previous, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(config)
+	if err != nil {
+		t.Fatalf("Open() rejected prior fixed status buckets: %v", err)
+	}
+	defer store.Close()
+	if got := store.Snapshot().HTTP.ByStatus; len(got) != len(statusCodes) || got["201"] != 0 {
+		t.Fatalf("upgraded HTTP buckets=%v", got)
+	}
+}
+
+func TestAsyncHTTPStatusBucketsDoNotImplyOCRCompletion(t *testing.T) {
+	store, err := Open(testConfig(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, status := range []int{202, 401, 409} {
+		if err := store.ObserveHTTP(status, time.Millisecond, 0); err != nil {
+			t.Fatalf("ObserveHTTP(%d): %v", status, err)
+		}
+	}
+	snapshot := store.Snapshot()
+	if snapshot.HTTP.Total != 3 || snapshot.HTTP.Errors != 2 || snapshot.HTTP.ByStatus["202"] != 1 || snapshot.HTTP.ByStatus["401"] != 1 || snapshot.HTTP.ByStatus["409"] != 1 {
+		t.Fatalf("HTTP stats=%+v", snapshot.HTTP)
+	}
+	if snapshot.OCR.Total != 0 || snapshot.OCR.Completed != 0 || snapshot.OCR.Failed != 0 {
+		t.Fatalf("HTTP-only async statuses changed OCR counters: %+v", snapshot.OCR)
+	}
+}
+
 func TestOpenRejectsHistogramWhoseMeanFallsBelowObservedMinimum(t *testing.T) {
 	config := testConfig(t)
 	store, err := Open(config)
@@ -186,7 +299,7 @@ func TestObservationsValidateAndOverflowWithoutMutating(t *testing.T) {
 	}
 	defer store.Close()
 	for _, call := range []func() error{
-		func() error { return store.ObserveHTTP(201, time.Second, 0) },
+		func() error { return store.ObserveHTTP(418, time.Second, 0) },
 		func() error { return store.ObserveHTTP(200, -time.Second, 0) },
 		func() error { return store.ObserveOCRJob(false, "raw-error", time.Second) },
 		func() error { return store.ObserveStage("unknown", true, time.Second) },
@@ -194,6 +307,9 @@ func TestObservationsValidateAndOverflowWithoutMutating(t *testing.T) {
 		if err := call(); err == nil {
 			t.Fatal("invalid observation succeeded")
 		}
+	}
+	if err := store.ObserveHTTP(201, time.Second, 0); err != nil {
+		t.Fatalf("201 registration response was rejected: %v", err)
 	}
 	if err := store.ObserveHTTP(200, 10*time.Millisecond, 1); err != nil {
 		t.Fatal(err)

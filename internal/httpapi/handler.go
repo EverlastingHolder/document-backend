@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"golang.org/x/sync/semaphore"
+
 	"passport-backend/internal/api"
 	"passport-backend/internal/metrics"
 	"passport-backend/internal/passport"
@@ -24,9 +26,12 @@ import (
 )
 
 const (
-	recognizePath         = "/v1/passport/recognize"
-	statsPath             = "/v1/stats"
-	multipartBodyOverhead = int64(64 << 10)
+	recognizePath           = "/v1/passport/recognize"
+	statsPath               = "/v1/stats"
+	clientInstallationsPath = "/v1/client-installations"
+	healthPath              = "/healthz"
+	readyPath               = "/readyz"
+	multipartBodyOverhead   = int64(64 << 10)
 )
 
 var (
@@ -52,6 +57,9 @@ type Config struct {
 	AllowedClientNetworks []netip.Prefix
 	Logger                *slog.Logger
 	Metrics               *metrics.Store
+	AsyncJobs             *AsyncJobsConfig
+	ReadinessCheck        func(context.Context) error
+	ReadinessTimeout      time.Duration
 }
 
 type errorResponse struct {
@@ -61,10 +69,11 @@ type errorResponse struct {
 }
 
 type handler struct {
-	config     Config
-	recognizer Recognizer
-	semaphore  chan struct{}
-	logger     *slog.Logger
+	config         Config
+	recognizer     Recognizer
+	semaphore      chan struct{}
+	asyncSemaphore *semaphore.Weighted
+	logger         *slog.Logger
 }
 
 // NewHandler constructs the public HTTP handler with explicit operational limits.
@@ -77,19 +86,44 @@ func NewHandler(config Config, recognizer Recognizer) (http.Handler, error) {
 	if err != nil {
 		return nil, errors.New("invalid allowed client networks")
 	}
+	if err := validateAsyncConfig(config.AsyncJobs); err != nil {
+		return nil, err
+	}
+	if (config.ReadinessCheck == nil) != (config.ReadinessTimeout <= 0) {
+		return nil, errors.New("invalid readiness configuration")
+	}
 	config.AllowedClientNetworks = allowedNetworks
-	return &handler{
+	handler := &handler{
 		config:     config,
 		recognizer: recognizer,
 		semaphore:  make(chan struct{}, config.MaxConcurrent),
 		logger:     telemetry.LoggerOrDiscard(config.Logger).With("component", "httpapi"),
-	}, nil
+	}
+	if config.AsyncJobs != nil {
+		handler.asyncSemaphore = semaphore.NewWeighted(int64(config.AsyncJobs.MaxConcurrentUploads))
+	}
+	return handler, nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	tracked := &loggingResponseWriter{ResponseWriter: w}
 	w = tracked
+	if r.URL.Path == healthPath || r.URL.Path == readyPath {
+		h.serveHealth(w, r)
+		return
+	}
+	if r.URL.Path == clientInstallationsPath {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	if _, ok := receiptJobIDFromPath(r.URL.Path); ok {
+		w.Header().Set("Cache-Control", "no-store")
+	}
+	if r.Method == http.MethodGet {
+		if _, ok := jobIDFromPath(r.URL.Path); ok {
+			w.Header().Set("Cache-Control", "no-store")
+		}
+	}
 	requestID, validID, err := requestIDFor(r)
 	if err != nil {
 		return
@@ -101,6 +135,8 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errorCode == "" {
 			if completionErrorCode != "" {
 				errorCode = completionErrorCode
+			} else if _, isReceipt := receiptJobIDFromPath(r.URL.Path); isReceipt && tracked.status == http.StatusConflict {
+				errorCode = "job_not_terminal"
 			} else {
 				errorCode = errorCodeForStatus(tracked.status)
 				if tracked.status == 0 && r.Context().Err() != nil {
@@ -137,6 +173,22 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}()
 	if !validID {
 		writeError(w, requestID, http.StatusBadRequest, "invalid_request", "Некорректный запрос.")
+		return
+	}
+	if r.URL.Path == jobsPath {
+		h.serveJobSubmission(w, r, requestID, &completionErrorCode)
+		return
+	}
+	if jobID, ok := receiptJobIDFromPath(r.URL.Path); ok {
+		h.serveJobReceipt(w, r, jobID, requestID, &completionErrorCode)
+		return
+	}
+	if r.URL.Path == clientInstallationsPath {
+		h.serveClientInstallation(w, r, requestID, &completionErrorCode)
+		return
+	}
+	if jobID, ok := jobIDFromPath(r.URL.Path); ok {
+		h.serveJobStatus(w, r, jobID, requestID, &completionErrorCode)
 		return
 	}
 	if r.URL.Path != recognizePath {
@@ -247,13 +299,52 @@ func safeMethod(method string) string {
 }
 
 func safeRoute(path string) string {
+	if path == healthPath || path == readyPath {
+		return path
+	}
+	if path == clientInstallationsPath {
+		return clientInstallationsPath
+	}
 	if path == recognizePath {
 		return recognizePath
+	}
+	if path == jobsPath {
+		return jobsPath
+	}
+	if _, ok := jobIDFromPath(path); ok {
+		return jobsPath + "/{job_id}"
+	}
+	if _, ok := receiptJobIDFromPath(path); ok {
+		return jobsPath + "/{job_id}/receipt"
 	}
 	if path == statsPath {
 		return statsPath
 	}
 	return "unmatched"
+}
+
+func jobIDFromPath(path string) (string, bool) {
+	prefix := jobsPath + "/"
+	if !strings.HasPrefix(path, prefix) {
+		return "", false
+	}
+	jobID := strings.TrimPrefix(path, prefix)
+	if jobID == "" || strings.Contains(jobID, "/") {
+		return "", false
+	}
+	return jobID, true
+}
+
+func receiptJobIDFromPath(path string) (string, bool) {
+	prefix := jobsPath + "/"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, "/receipt") {
+		return "", false
+	}
+	jobID := strings.TrimSuffix(strings.TrimPrefix(path, prefix), "/receipt")
+	if jobID == "" || strings.Contains(jobID, "/") {
+		return "", false
+	}
+	return jobID, true
 }
 
 type statsResponse struct {
@@ -297,12 +388,16 @@ func requestLogLevel(status int) slog.Level {
 
 func errorCodeForStatus(status int) string {
 	switch status {
-	case http.StatusOK:
+	case http.StatusOK, http.StatusCreated, http.StatusAccepted, http.StatusNoContent:
 		return "ok"
 	case http.StatusBadRequest:
 		return "invalid_request"
 	case http.StatusForbidden:
 		return "access_denied"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusConflict:
+		return "idempotency_conflict"
 	case http.StatusRequestEntityTooLarge:
 		return "upload_too_large"
 	case http.StatusUnsupportedMediaType:
@@ -317,6 +412,8 @@ func errorCodeForStatus(status int) string {
 		return "ocr_unavailable"
 	case http.StatusGatewayTimeout:
 		return "processing_timeout"
+	case http.StatusGone:
+		return "job_result_gone"
 	case http.StatusNotFound:
 		return "not_found"
 	case http.StatusMethodNotAllowed:

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +181,89 @@ func TestSafeHandlerAllowsBoundedMetricsFailureEvent(t *testing.T) {
 	entries := decodeTelemetryLines(t, []byte(data))
 	if len(entries) != 1 || entries[0]["event"] != "metrics.persist.failed" || entries[0]["error_code"] != "metrics_write_failed" || entries[0]["route"] != "/v1/stats" {
 		t.Fatalf("metrics failure event not safely retained: %#v", entries)
+	}
+}
+
+func TestSafeHandlerAllowsAsyncHTTPRouteAndClosedErrorCategories(t *testing.T) {
+	path := filepath.Join(privateTempDir(t), "api.jsonl")
+	sink, err := Open(Config{Path: path, Level: "debug", MaxSizeBytes: 1 << 16, MaxBackups: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := sink.Logger().With("component", "httpapi")
+	logger.Info("http.request.completed", "event", "http.request.completed", "method", "POST", "route", "/v1/passport/jobs", "status", http.StatusAccepted, "error_code", "ok")
+	logger.Warn("http.request.completed", "event", "http.request.completed", "method", "POST", "route", "/v1/passport/jobs", "status", http.StatusUnauthorized, "error_code", "unauthorized")
+	logger.Warn("http.request.completed", "event", "http.request.completed", "method", "POST", "route", "/v1/passport/jobs", "status", http.StatusConflict, "error_code", "idempotency_conflict")
+	logger.Error("http.request.completed", "event", "http.request.completed", "method", "POST", "route", "/v1/passport/jobs", "status", http.StatusServiceUnavailable, "error_code", "job_acceptance_unavailable", "authorization", "PRIVATE-RAW-TOKEN")
+	logger.Warn("http.request.completed", "event", "http.request.completed", "method", "GET", "route", "/v1/passport/jobs/{job_id}", "status", http.StatusServiceUnavailable, "error_code", "job_status_unavailable", "job_id", "9cfe2e2f-135d-42f4-8db5-ddabc5a2f831")
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := mustRead(t, path)
+	if bytes.Contains(data, []byte("PRIVATE-RAW-TOKEN")) {
+		t.Fatalf("raw token leaked into logs: %s", data)
+	}
+	entries := decodeTelemetryLines(t, data)
+	if len(entries) != 5 {
+		t.Fatalf("got %d log entries, want five: %#v", len(entries), entries)
+	}
+	for _, entry := range entries[:4] {
+		if entry["route"] != "/v1/passport/jobs" {
+			t.Errorf("async POST route was filtered: %#v", entry)
+		}
+	}
+	if entries[4]["route"] != "/v1/passport/jobs/{job_id}" || entries[4]["error_code"] != "job_status_unavailable" {
+		t.Errorf("async GET template/category was filtered: %#v", entries[4])
+	}
+	if bytes.Contains(data, []byte("9cfe2e2f-135d-42f4-8db5-ddabc5a2f831")) {
+		t.Fatalf("job ID leaked into logs: %s", data)
+	}
+}
+
+func TestSafeHandlerAllowsClientInstallationRouteWithoutHashLabels(t *testing.T) {
+	path := filepath.Join(privateTempDir(t), "api.jsonl")
+	sink, err := Open(Config{Path: path, Level: "debug", MaxSizeBytes: 1 << 16, MaxBackups: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink.Logger().With("component", "httpapi").Warn("http.request.completed", "event", "http.request.completed", "method", "POST", "route", "/v1/client-installations", "status", http.StatusTooManyRequests, "error_code", "registration_rate_limited", "token_sha256", "PRIVATE-HASH")
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := string(mustRead(t, path))
+	if strings.Contains(data, "PRIVATE-HASH") {
+		t.Fatalf("registration hash leaked into logs: %s", data)
+	}
+	entries := decodeTelemetryLines(t, []byte(data))
+	if len(entries) != 1 || entries[0]["route"] != "/v1/client-installations" || entries[0]["error_code"] != "registration_rate_limited" {
+		t.Fatalf("registration telemetry was rejected: %#v", entries)
+	}
+}
+
+func TestWorkerAndRecoveryEventsUseClosedSafeFields(t *testing.T) {
+	path := filepath.Join(privateTempDir(t), "worker.jsonl")
+	sink, err := Open(Config{Path: path, Level: "info", MaxSizeBytes: 8192, MaxBackups: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink.Logger().Info("worker.request.completed", "event", "worker.request.completed", "component", "workerapi", "method", "POST", "route", "/internal/worker/v1/claim", "status", 200, "error_code", "ok", "token", "pwt1_PRIVATE", "job_id", "PRIVATE-JOB")
+	sink.Logger().Warn("job.recovery.failed", "event", "job.recovery.failed", "component", "job_recovery", "error_code", "job_storage_unavailable", "path", "/private/pg")
+	sink.Logger().Warn("outbox.unavailable", "event", "outbox.unavailable", "component", "outbox", "error_code", "outbox_unavailable", "dsn", "PRIVATE-DSN")
+	sink.Logger().Error("outbox.authentication_rejected", "event", "outbox.authentication_rejected", "component", "outbox", "error_code", "outbox_authentication_rejected")
+	sink.Logger().Error("outbox.invalid_config", "event", "outbox.invalid_config", "component", "outbox", "error_code", "outbox_invalid_config")
+	sink.Logger().Info("outbox.reconnected", "event", "outbox.reconnected", "component", "outbox", "error_code", "broker_connection_restored")
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	contents := mustRead(t, path)
+	text := string(contents)
+	for _, secret := range []string{"pwt1_PRIVATE", "PRIVATE-JOB", "/private/pg", "PRIVATE-DSN"} {
+		if strings.Contains(text, secret) {
+			t.Errorf("worker telemetry leaked %q: %s", secret, text)
+		}
+	}
+	if !strings.Contains(text, "worker.request.completed") || !strings.Contains(text, "job.recovery.failed") || !strings.Contains(text, "job_storage_unavailable") || !strings.Contains(text, "outbox.unavailable") || !strings.Contains(text, "outbox_unavailable") || !strings.Contains(text, "outbox.authentication_rejected") || !strings.Contains(text, "outbox.invalid_config") || !strings.Contains(text, "outbox.reconnected") || !strings.Contains(text, "broker_connection_restored") {
+		t.Fatalf("expected closed worker/recovery categories in log: %s", text)
 	}
 }
 

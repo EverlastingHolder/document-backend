@@ -5,6 +5,8 @@ from pathlib import Path
 from types import ModuleType
 import sys
 import tempfile
+import hashlib
+import json
 from unittest import mock
 
 from ocr.runtime import russiandocs_worker
@@ -56,6 +58,7 @@ class RussianDocsAdapterTests(unittest.TestCase):
             model_root = root / "cached" / "document_processing" / "models"
             (model_root / "Borders").mkdir(parents=True)
             package = ModuleType("document_processing")
+            package.__version__ = "4.6.0"
             package.Pipeline = mock.Mock(return_value="pipeline")
             config = ModuleType("document_processing.config")
             config.DEFAULT_CFG = {"DocDetector": str(default_models / "Borders")}
@@ -77,6 +80,7 @@ class RussianDocsAdapterTests(unittest.TestCase):
             model_root = root / "cached"
             model_root.mkdir()
             package = ModuleType("document_processing")
+            package.__version__ = "4.6.0"
             package.Pipeline = mock.Mock()
             config = ModuleType("document_processing.config")
             config.DEFAULT_CFG = {"DocDetector": str(root / "outside")}
@@ -88,6 +92,41 @@ class RussianDocsAdapterTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "escaped repository"):
                     russiandocs_worker.load_pipeline(repo, model_root)
             package.Pipeline.assert_not_called()
+
+    def test_async_startup_checks_source_version_and_model_lock_hashes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            repo = root / "repo"
+            source = repo / "document_processing"
+            source.mkdir(parents=True)
+            (source / "__init__.py").write_text('__version__ = "4.5.3"\n', encoding="utf-8")
+            models = root / "models"
+            models.mkdir()
+            contents = b"immutable model fixture"
+            (models / "fixture.onnx").write_bytes(contents)
+            lock = {
+                "models_version": "v2",
+                "files": [{"path": "fixture.onnx", "size": len(contents), "sha256": hashlib.sha256(contents).hexdigest()}],
+            }
+            (source / "models.lock.json").write_text(json.dumps(lock), encoding="utf-8")
+            package = ModuleType("document_processing")
+            package.__version__ = "4.5.3"
+            package.Pipeline = mock.Mock(return_value="pipeline")
+            config = ModuleType("document_processing.config")
+            config.DEFAULT_CFG = {}
+            config.ROOT = source
+            with mock.patch.dict(sys.modules, {
+                "document_processing": package,
+                "document_processing.config": config,
+            }):
+                self.assertEqual(russiandocs_worker.load_pipeline(repo, models, "4.5.3", "v2"), "pipeline")
+                with self.assertRaisesRegex(RuntimeError, "source version mismatch"):
+                    russiandocs_worker.load_pipeline(repo, models, "4.5.0", "v2")
+                with self.assertRaisesRegex(RuntimeError, "model version mismatch"):
+                    russiandocs_worker.load_pipeline(repo, models, "4.5.3", "v3")
+                (models / "fixture.onnx").write_bytes(b"tampered model bytes")
+                with self.assertRaisesRegex(RuntimeError, "model asset mismatch"):
+                    russiandocs_worker.load_pipeline(repo, models, "4.5.3", "v2")
 
 
 if __name__ == "__main__":

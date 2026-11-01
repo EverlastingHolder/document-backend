@@ -1,0 +1,64 @@
+{
+  "listen_address": "172.30.0.10:8080",
+  "allowed_client_networks": [
+    "172.30.0.21/32"
+  ],
+  "max_upload_bytes": 8388608,
+  "max_concurrent": 1,
+  "pipeline_version": "replace-with-the-operator-selected-pipeline-version",
+  "sync_ocr_enabled": false,
+  "ocr_timeout": "360s",
+  "read_header_timeout": "5s",
+  "read_timeout": "30s",
+  "write_timeout": "420s",
+  "idle_timeout": "30s",
+  "shutdown_timeout": "30s",
+  "max_header_bytes": 16384,
+  "logging": {
+    "path": "/var/lib/passport/state/logs/api.jsonl",
+    "level": "info",
+    "max_size_bytes": 5242880,
+    "max_backups": 3
+  },
+  "metrics": {
+    "state_path": "/var/lib/passport/state/metrics/state.json"
+  },
+  "async_jobs": {
+    "database_dsn_file": "/run/passport-api/secrets/postgres_dsn",
+    "connect_timeout": "5s",
+    "migration_lock_timeout": "30s",
+    "image_root": "/var/lib/passport/images",
+    "max_stored_image_bytes": 10737418240,
+    "max_concurrent_uploads": 8,
+    "client_enrollment": {
+      "max_clients": 10000,
+      "max_new_clients_per_minute": 30
+    },
+    "retention": {
+      "claim_lease": "30s",
+      "interval": "1s",
+      "operation_timeout": "10s",
+      "batch_size": 100
+    }
+  },
+  "queue_processing": {
+    "worker_credentials_file": "/run/passport-api/secrets/worker_credentials",
+    "private_listener_address": "172.30.0.10:8081",
+    "broker_dsn_file": "/run/passport-api/secrets/broker_dsn",
+    "connect_timeout": "5s",
+    "poll_interval": "1s",
+    "publisher_lease": "30s",
+    "publish_timeout": "10s",
+    "publish_backoff": "2s",
+    "reconnect_min": "1s",
+    "reconnect_max": "30s",
+    "consumer_ack_timeout": "35m",
+    "max_attempts": 5,
+    "retry_initial_delay": "2s",
+    "retry_max_delay": "1m",
+    "hard_processing_timeout": "25m",
+    "completion_budget": "2m",
+    "attempt_lease": "30m",
+    "recovery_interval": "15s"
+  }
+}

@@ -1,0 +1,20 @@
+FROM golang:1.27.3-alpine3.24 AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY internal/clientauth ./internal/clientauth
+COPY internal/clientenrollment ./internal/clientenrollment
+COPY internal/jsonstrict ./internal/jsonstrict
+COPY cmd/migrate ./cmd/migrate
+COPY internal/jobs ./internal/jobs
+COPY internal/imagestore ./internal/imagestore
+COPY internal/retention ./internal/retention
+COPY internal/jobstore/postgres ./internal/jobstore/postgres
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/passport-migrate ./cmd/migrate
+
+FROM scratch
+COPY --from=build /out/passport-migrate /passport-migrate
+USER 0:0
+ENTRYPOINT ["/passport-migrate"]

@@ -15,7 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"passport-backend/internal/clientauth"
+	"passport-backend/internal/jobs"
 	"passport-backend/internal/passport"
 	"passport-backend/internal/telemetry"
 )
@@ -139,6 +142,40 @@ func TestRequestLogNormalizesUnmatchedPathAndAccessDenial(t *testing.T) {
 	entries := decodeLogLines(t, data)
 	if len(entries) != 2 || entries[0]["route"] != "unmatched" || entries[0]["status"] != float64(http.StatusNotFound) || entries[0]["error_code"] != "not_found" || entries[0]["level"] != "WARN" || entries[1]["route"] != recognizePath || entries[1]["status"] != float64(http.StatusForbidden) || entries[1]["error_code"] != "access_denied" || entries[1]["level"] != "WARN" {
 		t.Fatalf("unexpected access denial log: %#v", entries)
+	}
+}
+
+func TestStatusRequestLogUsesFixedRouteTemplate(t *testing.T) {
+	logger, path, closeSink := testLogSink(t)
+	defer closeSink()
+	const jobID = "9cfe2e2f-135d-42f4-8db5-ddabc5a2f831"
+	config := testConfig()
+	config.Logger = logger
+	config.AsyncJobs = &AsyncJobsConfig{
+		Authenticator: &asyncAuthStub{principal: clientauth.Principal{OwnerID: "owner"}},
+		Acceptor:      &asyncAcceptorStub{}, MaxConcurrentUploads: 1,
+		StatusReader: &asyncStatusReaderStub{err: jobs.ErrNotFound}, StatusReadTimeout: time.Second,
+	}
+	handler := newTestHandler(t, config, &fakeRecognizer{})
+	request := httptest.NewRequest(http.MethodGet, jobsPath+"/"+jobID, nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	request.Header.Set("Authorization", "Bearer pbt1_test")
+	request.Header.Set("X-Request-ID", "94b86c5c-2520-4c0f-b91e-6d4a948fc88a")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if err := closeSink(); err != nil {
+		t.Fatal(err)
+	}
+	data := mustReadHTTPLog(t, path)
+	if bytes.Contains(data, []byte(jobID)) {
+		t.Fatalf("job ID leaked to logs: %s", data)
+	}
+	entries := decodeLogLines(t, data)
+	if len(entries) != 1 || entries[0]["route"] != jobsPath+"/{job_id}" || entries[0]["status"] != float64(http.StatusNotFound) || entries[0]["error_code"] != "not_found" {
+		t.Fatalf("unexpected status request log: %#v", entries)
 	}
 }
 

@@ -111,6 +111,221 @@ func TestLoadLocalExampleConfigHasExplicitLoopbackSettings(t *testing.T) {
 	}
 }
 
+func TestLoadQueueExampleConfigUsesGoOnlyRuntimeFields(t *testing.T) {
+	_, sourcePath, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller() did not return test source path")
+	}
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourcePath), "..", ".."))
+	path := filepath.Join(repoRoot, "deploy", "api.queue.example.json")
+	serverConfig, ocrConfig, _, runtimeConfig, err := loadFullRuntimeConfig(path)
+	if err != nil {
+		t.Fatalf("load queue example: %v", err)
+	}
+	if serverConfig.Address != "172.30.0.10:8080" || serverConfig.HTTP.AsyncJobs != nil ||
+		runtimeConfig == nil || !runtimeConfig.Enabled || runtimeConfig.SyncOCREnabled || runtimeConfig.QueueProcessing == nil {
+		t.Fatalf("queue example config did not map to Go-only queue mode: server=%+v runtime=%+v", serverConfig, runtimeConfig)
+	}
+	if ocrConfig.RussianPython != "" || ocrConfig.RussianRepo != "" || ocrConfig.WorkRoot != "" {
+		t.Fatalf("queue example unexpectedly configures Python in API: %+v", ocrConfig)
+	}
+
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed := decodeFixtureMap(t, string(contents))
+	parsed["pipeline_version"] = "integration-stage4-controlled"
+	queue := parsed["queue_processing"].(map[string]any)
+	queue["connect_timeout"] = "3s"
+	queue["poll_interval"] = "50ms"
+	queue["publisher_lease"] = "2s"
+	queue["publish_timeout"] = "500ms"
+	queue["publish_backoff"] = "100ms"
+	queue["reconnect_min"] = "100ms"
+	queue["reconnect_max"] = "500ms"
+	queue["consumer_ack_timeout"] = "5m"
+	queue["max_attempts"] = float64(2)
+	queue["retry_initial_delay"] = "100ms"
+	queue["retry_max_delay"] = "500ms"
+	queue["hard_processing_timeout"] = "5s"
+	queue["completion_budget"] = "2s"
+	queue["attempt_lease"] = "15s"
+	queue["recovery_interval"] = "1s"
+	parsed["async_jobs"].(map[string]any)["connect_timeout"] = "5s"
+	parsed["async_jobs"].(map[string]any)["migration_lock_timeout"] = "10s"
+	parsed["async_jobs"].(map[string]any)["max_stored_image_bytes"] = float64(1 << 20)
+	parsed["async_jobs"].(map[string]any)["retention"] = map[string]any{
+		"claim_lease": "30s", "interval": "1s", "operation_timeout": "5s", "batch_size": float64(100),
+	}
+	if _, _, _, _, err := loadFullRuntimeConfig(writeAPIConfig(t, encodeFixture(t, parsed))); err != nil {
+		t.Fatalf("load queue example with integration timing policy: %v", err)
+	}
+}
+
+func TestLoadFullRuntimeConfigAcceptsOptionalAsyncJobsBlock(t *testing.T) {
+	parsed := decodeFixtureMap(t, validAPIConfig())
+	parsed["async_jobs"] = map[string]any{
+		"credentials_file":       "private/async/credentials.json",
+		"database_dsn_file":      "private/async/database-dsn.txt",
+		"connect_timeout":        "5s",
+		"migration_lock_timeout": "10s",
+		"image_root":             "private/images",
+		"max_stored_image_bytes": float64(1 << 30),
+		"max_concurrent_uploads": float64(4),
+		"retention":              map[string]any{"claim_lease": "30s", "interval": "1s", "operation_timeout": "5s", "batch_size": float64(100)},
+	}
+	configPath := writeAPIConfig(t, encodeFixture(t, parsed))
+	serverConfig, _, _, asyncConfig, err := loadFullRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadFullRuntimeConfig() error = %v", err)
+	}
+	base := filepath.Dir(configPath)
+	if asyncConfig == nil || asyncConfig.CredentialsFile != filepath.Join(base, "private/async/credentials.json") ||
+		asyncConfig.DatabaseDSNFile != filepath.Join(base, "private/async/database-dsn.txt") ||
+		asyncConfig.ImageRoot != filepath.Join(base, "private/images") || asyncConfig.ConnectTimeout != 5*time.Second ||
+		asyncConfig.MigrationLockTimeout != 10*time.Second || asyncConfig.MaxStoredImageBytes != 1<<30 || asyncConfig.MaxConcurrentUploads != 4 ||
+		asyncConfig.Retention.ClaimLease != 30*time.Second || asyncConfig.Retention.Interval != time.Second || asyncConfig.Retention.OperationTimeout != 5*time.Second || asyncConfig.Retention.BatchSize != 100 {
+		t.Fatalf("async config = %+v", asyncConfig)
+	}
+	if serverConfig.HTTP.AsyncJobs != nil {
+		t.Fatal("loader must leave async dependencies unconstructed")
+	}
+}
+
+func TestLoadFullRuntimeConfigAllowsEnrollmentWithoutStaticClientRegistry(t *testing.T) {
+	parsed := decodeFixtureMap(t, validAPIConfig())
+	parsed["async_jobs"] = map[string]any{
+		"database_dsn_file":      "private/async/database-dsn.txt",
+		"connect_timeout":        "5s",
+		"migration_lock_timeout": "10s",
+		"image_root":             "private/images",
+		"max_stored_image_bytes": float64(1 << 30),
+		"max_concurrent_uploads": float64(4),
+		"retention":              map[string]any{"claim_lease": "30s", "interval": "1s", "operation_timeout": "5s", "batch_size": float64(100)},
+		"client_enrollment": map[string]any{
+			"max_clients":                float64(1000),
+			"max_new_clients_per_minute": float64(25),
+		},
+	}
+	configPath := writeAPIConfig(t, encodeFixture(t, parsed))
+	_, _, _, asyncConfig, err := loadFullRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadFullRuntimeConfig() error = %v", err)
+	}
+	if asyncConfig.CredentialsFile != "" || asyncConfig.ClientEnrollment == nil ||
+		asyncConfig.ClientEnrollment.MaxClients != 1000 || asyncConfig.ClientEnrollment.MaxNewClientsPerMinute != 25 {
+		t.Fatalf("async enrollment config = %+v", asyncConfig)
+	}
+	parsed["async_jobs"].(map[string]any)["client_enrollment"].(map[string]any)["max_new_clients_per_minute"] = float64(0)
+	if _, _, _, _, err := loadFullRuntimeConfig(writeAPIConfig(t, encodeFixture(t, parsed))); err == nil {
+		t.Fatal("loadFullRuntimeConfig() accepted a non-positive enrollment rate cap")
+	}
+}
+
+func TestLoadFullRuntimeConfigSupportsQueueModeWithoutPythonConfiguration(t *testing.T) {
+	parsed := decodeFixtureMap(t, validAPIConfig())
+	delete(parsed, "ocr")
+	delete(parsed, "process_stop_grace")
+	delete(parsed, "max_output_bytes")
+	delete(parsed, "max_image_pixels")
+	parsed["sync_ocr_enabled"] = false
+	parsed["async_jobs"] = validAsyncJobsFixture()
+	parsed["queue_processing"] = validQueueProcessingFixture()
+	configPath := writeAPIConfig(t, encodeFixture(t, parsed))
+	serverConfig, ocrConfig, _, asyncConfig, err := loadFullRuntimeConfig(configPath)
+	if err != nil {
+		t.Fatalf("loadFullRuntimeConfig() error = %v", err)
+	}
+	if asyncConfig == nil || !asyncConfig.Enabled || asyncConfig.SyncOCREnabled || asyncConfig.QueueProcessing == nil {
+		t.Fatalf("async runtime config = %+v, want queue enabled and sync OCR disabled", asyncConfig)
+	}
+	if ocrConfig.RussianPython != "" || ocrConfig.RussianRepo != "" || ocrConfig.WorkRoot != "" || serverConfig.HTTP.OCRTimeout == 0 {
+		t.Fatalf("disabled Python config should not be loaded: OCR=%+v HTTP=%+v", ocrConfig, serverConfig.HTTP)
+	}
+	queue := asyncConfig.QueueProcessing
+	base := filepath.Dir(configPath)
+	if queue.WorkerCredentialsFile != filepath.Join(base, "private/queue/workers.json") ||
+		queue.BrokerDSNFile != filepath.Join(base, "private/queue/broker-dsn.txt") ||
+		queue.PrivateListenerAddress != "127.0.0.1:8766" || queue.ConsumerAckTimeout != 22*time.Minute ||
+		queue.AttemptLease != 15*time.Minute || asyncConfig.PipelineVersion != "russiandocs-local-example-v1" {
+		t.Fatalf("queue runtime config = %+v", queue)
+	}
+}
+
+func TestLoadFullRuntimeConfigRejectsQueueTimingAndPathDrift(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		edit func(map[string]any, map[string]any)
+	}{
+		{"lease does not exceed processing plus completion", func(_ map[string]any, queue map[string]any) { queue["attempt_lease"] = "12m" }},
+		{"ack timeout does not exceed lease plus completion", func(_ map[string]any, queue map[string]any) { queue["consumer_ack_timeout"] = "17m" }},
+		{"broker secret overlaps client registry", func(async, queue map[string]any) { queue["broker_dsn_file"] = async["credentials_file"] }},
+		{"private listener duplicates public bind", func(_ map[string]any, queue map[string]any) { queue["private_listener_address"] = "127.0.0.1:8765" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed := decodeFixtureMap(t, validAPIConfig())
+			async := validAsyncJobsFixture()
+			queue := validQueueProcessingFixture()
+			test.edit(async, queue)
+			parsed["async_jobs"] = async
+			parsed["queue_processing"] = queue
+			if _, _, _, _, err := loadFullRuntimeConfig(writeAPIConfig(t, encodeFixture(t, parsed))); err == nil {
+				t.Fatal("loadFullRuntimeConfig() accepted invalid queue processing configuration")
+			}
+		})
+	}
+}
+
+func validAsyncJobsFixture() map[string]any {
+	return map[string]any{
+		"credentials_file": "private/async/credentials.json", "database_dsn_file": "private/async/database-dsn.txt",
+		"connect_timeout": "5s", "migration_lock_timeout": "10s", "image_root": "private/images",
+		"max_stored_image_bytes": float64(1 << 30), "max_concurrent_uploads": float64(4),
+		"retention": map[string]any{"claim_lease": "30s", "interval": "1s", "operation_timeout": "5s", "batch_size": float64(100)},
+	}
+}
+
+func validQueueProcessingFixture() map[string]any {
+	return map[string]any{
+		"worker_credentials_file": "private/queue/workers.json", "private_listener_address": "127.0.0.1:8766",
+		"broker_dsn_file": "private/queue/broker-dsn.txt", "connect_timeout": "5s", "poll_interval": "1s",
+		"publisher_lease": "30s", "publish_timeout": "5s", "publish_backoff": "1s",
+		"reconnect_min": "1s", "reconnect_max": "30s", "consumer_ack_timeout": "22m",
+		"max_attempts": float64(5), "retry_initial_delay": "1s", "retry_max_delay": "1m",
+		"hard_processing_timeout": "10m", "completion_budget": "2m", "attempt_lease": "15m",
+		"recovery_interval": "10s",
+	}
+}
+
+func TestLoadFullRuntimeConfigRejectsInvalidAsyncLimitAndOverlappingPaths(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		modify func(map[string]any)
+	}{
+		{name: "zero total bytes", modify: func(async map[string]any) { async["max_stored_image_bytes"] = float64(0) }},
+		{name: "zero concurrency", modify: func(async map[string]any) { async["max_concurrent_uploads"] = float64(0) }},
+		{name: "image root overlaps credentials", modify: func(async map[string]any) { async["image_root"] = "private/async" }},
+		{name: "retention interval exceeds five seconds", modify: func(async map[string]any) { async["retention"].(map[string]any)["interval"] = "6s" }},
+		{name: "retention operation outlives claim lease", modify: func(async map[string]any) { async["retention"].(map[string]any)["operation_timeout"] = "30s" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			parsed := decodeFixtureMap(t, validAPIConfig())
+			async := map[string]any{
+				"credentials_file": "private/async/credentials.json", "database_dsn_file": "private/async/database-dsn.txt",
+				"connect_timeout": "5s", "migration_lock_timeout": "10s", "image_root": "private/images",
+				"max_stored_image_bytes": float64(1 << 30), "max_concurrent_uploads": float64(4),
+				"retention": map[string]any{"claim_lease": "30s", "interval": "1s", "operation_timeout": "5s", "batch_size": float64(100)},
+			}
+			test.modify(async)
+			parsed["async_jobs"] = async
+			if _, _, _, _, err := loadFullRuntimeConfig(writeAPIConfig(t, encodeFixture(t, parsed))); err == nil {
+				t.Fatal("loadFullRuntimeConfig() accepted invalid async jobs configuration")
+			}
+		})
+	}
+}
+
 func TestLoadConfigRejectsMalformedOrNonStrictJSON(t *testing.T) {
 	base := validAPIConfig()
 	tests := []struct {
@@ -416,6 +631,33 @@ func TestLoadRuntimeConfigRejectsMetricsLockAndLogCollision(t *testing.T) {
 	config["logging"].(map[string]any)["path"] = "private/metrics/state.json.lock"
 	if _, _, _, err := loadRuntimeConfig(writeAPIConfig(t, encodeFixture(t, config))); err == nil {
 		t.Fatal("loadRuntimeConfig accepted logging path that collides with metrics lock")
+	}
+}
+
+func TestMetricsPathConflictsDoesNotTreatEmptyWorkRootAsCurrentDirectory(t *testing.T) {
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(string(filepath.Separator)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := os.Chdir(previous); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	}()
+
+	statePath := "/var/lib/passport/state/metrics/state.json"
+	logPath := "/var/lib/passport/state/logs/api.jsonl"
+	if metricsPathConflicts(statePath, logPath, "") {
+		t.Fatal("empty OCR work root was interpreted as the process working directory")
+	}
+	if !metricsPathConflicts(statePath, logPath, "/var/lib/passport/state") {
+		t.Fatal("metrics path under the configured OCR work root was not rejected")
+	}
+	if metricsPathConflicts(statePath, logPath, "/var/lib/passport/ocr-work") {
+		t.Fatal("metrics path outside the configured OCR work root was rejected")
 	}
 }
 

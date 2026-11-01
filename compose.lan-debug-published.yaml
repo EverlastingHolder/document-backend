@@ -1,0 +1,4 @@
+services:
+  lan-debug-caddy:
+    ports:
+      - "${PASSPORT_LAN_DEBUG_BIND_ADDRESS:?Set the exact host LAN address}:${PASSPORT_LAN_DEBUG_HOST_PORT:?Set an alternate host port}:8080"

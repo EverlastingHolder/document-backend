@@ -1,0 +1,15 @@
+FROM caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+
+RUN apk add --no-cache libcap-utils \
+    && setcap -r /usr/bin/caddy \
+    && addgroup -S -g 10001 caddy-runtime \
+    && adduser -S -D -H -u 10001 -G caddy-runtime caddy-runtime \
+    && mkdir -p /data /config \
+    && chown 10001:10001 /data /config \
+    && chmod 0700 /data /config \
+    && apk del libcap-utils
+
+COPY Caddyfile.lan-debug /etc/caddy/Caddyfile
+USER 10001:10001
+ENV XDG_DATA_HOME=/data XDG_CONFIG_HOME=/config
+ENTRYPOINT ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]

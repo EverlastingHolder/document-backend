@@ -1,0 +1,18 @@
+FROM caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+
+USER 0:0
+RUN apk add --no-cache su-exec libcap-utils \
+    && setcap -r /usr/bin/caddy \
+    && addgroup -S -g 10001 caddy-runtime \
+    && adduser -S -D -H -u 10001 -G caddy-runtime caddy-runtime \
+    && mkdir -p /run/passport-caddy /data /config \
+    && chown 10001:10001 /run/passport-caddy /data /config \
+    && chmod 0700 /run/passport-caddy /data /config \
+    && apk del libcap-utils
+
+COPY entrypoint.sh /usr/local/bin/passport-caddy-entrypoint
+COPY Caddyfile /etc/caddy/Caddyfile
+RUN chmod 0555 /usr/local/bin/passport-caddy-entrypoint
+
+ENV XDG_DATA_HOME=/data XDG_CONFIG_HOME=/config
+ENTRYPOINT ["/usr/local/bin/passport-caddy-entrypoint"]

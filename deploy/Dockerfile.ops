@@ -1,0 +1,32 @@
+FROM golang:1.27.3-alpine3.24 AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY internal/clientauth ./internal/clientauth
+COPY internal/clientenrollment ./internal/clientenrollment
+COPY internal/imagestore ./internal/imagestore
+COPY internal/jobs ./internal/jobs
+COPY internal/jobstore/postgres ./internal/jobstore/postgres
+COPY internal/jsonstrict ./internal/jsonstrict
+COPY internal/retention ./internal/retention
+COPY cmd/client-admin ./cmd/client-admin
+COPY cmd/passport-ops ./cmd/passport-ops
+COPY cmd/job-maintenance ./cmd/job-maintenance
+COPY internal/technicalbackup ./internal/technicalbackup
+COPY cmd/technical-backup ./cmd/technical-backup
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/client-admin ./cmd/client-admin \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/passport-ops ./cmd/passport-ops \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/job-maintenance ./cmd/job-maintenance \
+    && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/technical-backup ./cmd/technical-backup
+
+FROM alpine:3.24
+RUN apk add --no-cache ca-certificates su-exec
+COPY --from=build /out/client-admin /usr/local/bin/client-admin
+COPY --from=build /out/passport-ops /usr/local/bin/passport-ops
+COPY --from=build /out/job-maintenance /usr/local/bin/job-maintenance
+COPY --from=build /out/technical-backup /usr/local/bin/technical-backup
+COPY deploy/ops-entrypoint.sh /usr/local/bin/passport-ops-entrypoint
+RUN chmod 0555 /usr/local/bin/client-admin /usr/local/bin/passport-ops /usr/local/bin/job-maintenance /usr/local/bin/technical-backup /usr/local/bin/passport-ops-entrypoint
+ENTRYPOINT ["/usr/local/bin/passport-ops-entrypoint"]

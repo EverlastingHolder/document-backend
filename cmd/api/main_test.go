@@ -40,6 +40,52 @@ func TestRunReturnsBeforeConstructionWhenContextIsAlreadyCancelled(t *testing.T)
 	}
 }
 
+func TestMainExitCheckConfigValidatesWithoutStartingServices(t *testing.T) {
+	configPath := writeAPIConfig(t, validAPIConfig())
+	var stderr bytes.Buffer
+	if code := mainExit([]string{"-config", configPath, "-check-config"}, &stderr); code != 0 {
+		t.Fatalf("mainExit() = %d, want 0; stderr=%q", code, stderr.String())
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("successful config check wrote stderr %q", stderr.String())
+	}
+}
+
+func TestMainExitCheckConfigRejectsInvalidConfigWithoutDetails(t *testing.T) {
+	configPath := writeAPIConfig(t, strings.Replace(validAPIConfig(), `"max_concurrent":2`, `"max_concurrent":0`, 1))
+	var stderr bytes.Buffer
+	if code := mainExit([]string{"-config", configPath, "-check-config"}, &stderr); code != 2 {
+		t.Fatalf("mainExit() = %d, want 2", code)
+	}
+	if got := strings.TrimSpace(stderr.String()); got != "configuration_invalid" {
+		t.Fatalf("config check error = %q, want fixed safe category", got)
+	}
+}
+
+func TestRunComponentsCancelsAndDrainsAllRunnersOnFailure(t *testing.T) {
+	started := make(chan struct{}, 1)
+	stopped := make(chan struct{}, 1)
+	blocker := runnerFunc(func(ctx context.Context) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		stopped <- struct{}{}
+		return nil
+	})
+	failure := errors.New("private component failure")
+	failed := runnerFunc(func(context.Context) error {
+		<-started
+		return failure
+	})
+	if err := runComponents(context.Background(), blocker, failed); !errors.Is(err, failure) {
+		t.Fatalf("runComponents() error=%v, want component failure", err)
+	}
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("runComponents returned before cancelling and draining the other runner")
+	}
+}
+
 func TestRunPreparesPrivateWorkRootBeforeProviderConstruction(t *testing.T) {
 	configPath := writeAPIConfig(t, validAPIConfig())
 	configDir := filepath.Dir(configPath)
@@ -142,6 +188,12 @@ func TestRunDoesNotConstructProviderForInvalidConfigOrWorkRoot(t *testing.T) {
 				t.Fatalf("constructors called provider=%d server=%d before setup succeeded", providers, servers)
 			}
 			assertSafeOutput(t, output.String(), "blocked", "invalid config")
+			if test.name == "invalid config" {
+				var fallback map[string]any
+				if decodeErr := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &fallback); decodeErr != nil || fallback["phase"] != "config_base_validation" {
+					t.Fatalf("invalid config fallback phase=%v decodeErr=%v", fallback["phase"], decodeErr)
+				}
+			}
 		})
 	}
 }
@@ -370,7 +422,7 @@ func TestRunFailsClosedAndWritesSafeJSONWhenLogTargetIsUnsafe(t *testing.T) {
 	if err := json.Unmarshal(bytes.TrimSpace(output.Bytes()), &fallback); err != nil {
 		t.Fatalf("fallback is not JSON: %v (%q)", err, output.String())
 	}
-	if fallback["service"] != "passport-api" || fallback["component"] != "startup" || fallback["event"] != "service.failed" || fallback["error_code"] != "startup_failed" || strings.Contains(output.String(), "link.jsonl") {
+	if fallback["service"] != "passport-api" || fallback["component"] != "startup" || fallback["event"] != "service.failed" || fallback["phase"] != "logging_open" || fallback["error_code"] != "startup_failed" || strings.Contains(output.String(), "link.jsonl") {
 		t.Fatalf("unsafe startup fallback: %#v", fallback)
 	}
 }
@@ -422,6 +474,10 @@ type fakeRunner struct {
 	runErr   error
 	run      func(context.Context) error
 }
+
+type runnerFunc func(context.Context) error
+
+func (run runnerFunc) Run(ctx context.Context) error { return run(ctx) }
 
 func (f *fakeRunner) Run(ctx context.Context) error {
 	f.runCalls++

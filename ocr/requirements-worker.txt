@@ -1,0 +1,21 @@
+# Worker transport plus a pinned CPU inference dependency compatibility profile
+# based on upstream RussianDocsOCR v4.6.0. This does not pin the operator's
+# selected source/model snapshot; those labels and assets are mounted read-only.
+pika==1.4.4
+numpy==2.2.6
+onnxruntime==1.21.1
+opencv-python-headless==4.12.0.88
+PyYAML==6.0.2
+scikit-learn==1.7.0
+Pillow==12.3.0
+cloudpickle==3.1.2
+coloredlogs==15.0.1
+flatbuffers==25.12.19
+humanfriendly==10.0
+joblib==1.6.0
+mpmath==1.3.0
+packaging==26.3
+protobuf==7.36.2
+scipy==1.18.1
+sympy==1.14.0
+threadpoolctl==3.7.0

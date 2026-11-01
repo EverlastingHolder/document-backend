@@ -1,0 +1,362 @@
+name: passport-backend
+
+services:
+  postgres:
+    image: postgres:18.6-alpine3.24
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PASSPORT_POSTGRES_DB:-passport}
+      POSTGRES_USER: ${PASSPORT_POSTGRES_USER:-passport}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    shm_size: 128mb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+    networks:
+      - private
+
+  rabbitmq:
+    image: passport-backend-rabbitmq:4.4.0
+    hostname: ${PASSPORT_RABBITMQ_HOSTNAME:-passport-rabbitmq}
+    build:
+      context: ./deploy/rabbitmq
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${PASSPORT_RABBITMQ_USER:-passport}
+      PASSPORT_RABBITMQ_PASSWORD_FILE: /run/secrets/rabbitmq_password
+    secrets:
+      - rabbitmq_password
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    networks:
+      - private
+
+  migrate:
+    profiles: [migrate]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.migrate
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [DAC_OVERRIDE]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    secrets:
+      - postgres_dsn
+    command:
+      - -dsn-file
+      - /run/secrets/postgres_dsn
+      - -connect-timeout
+      - 10s
+      - -migration-lock-timeout
+      - 15s
+      - -migration-timeout
+      - 60s
+    networks:
+      - private
+
+  client-admin:
+    profiles: [ops]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.ops
+    image: passport-backend-ops:stage7
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    environment:
+      PASSPORT_OPS_UID: ${PASSPORT_APP_UID:-10001}
+      PASSPORT_OPS_GID: ${PASSPORT_APP_GID:-10001}
+    tmpfs:
+      - /run/passport-ops:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001},size=1m
+    secrets:
+      - postgres_dsn
+    networks:
+      - private
+
+  passport-ops:
+    profiles: [ops]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.ops
+    image: passport-backend-ops:stage7
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    environment:
+      PASSPORT_OPS_UID: ${PASSPORT_APP_UID:-10001}
+      PASSPORT_OPS_GID: ${PASSPORT_APP_GID:-10001}
+    tmpfs:
+      - /run/passport-ops:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001},size=1m
+    volumes:
+      - type: bind
+        source: ${PASSPORT_IMAGE_ROOT:-/__passport_image_root_required__}
+        target: /var/lib/passport/images
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - postgres_dsn
+    networks:
+      - private
+
+  job-maintenance:
+    profiles: [ops]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.ops
+    image: passport-backend-ops:stage7
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    environment:
+      PASSPORT_OPS_UID: ${PASSPORT_APP_UID:-10001}
+      PASSPORT_OPS_GID: ${PASSPORT_APP_GID:-10001}
+      PASSPORT_MAINTENANCE_API_STOPPED: ${PASSPORT_MAINTENANCE_API_STOPPED:-false}
+      PASSPORT_MAINTENANCE_DSN_FILE: /run/passport-ops/postgres_dsn
+      PASSPORT_IMAGE_ROOT: /var/lib/passport/images
+      PASSPORT_MAX_UPLOAD_BYTES: ${PASSPORT_MAX_UPLOAD_BYTES:-}
+      PASSPORT_MAINTENANCE_CONNECT_TIMEOUT: ${PASSPORT_MAINTENANCE_CONNECT_TIMEOUT:-}
+      PASSPORT_MAINTENANCE_LOCK_TIMEOUT: ${PASSPORT_MAINTENANCE_LOCK_TIMEOUT:-}
+      PASSPORT_MAINTENANCE_OPERATION_TIMEOUT: ${PASSPORT_MAINTENANCE_OPERATION_TIMEOUT:-}
+      PASSPORT_RETENTION_CLAIM_LEASE: ${PASSPORT_RETENTION_CLAIM_LEASE:-}
+      PASSPORT_RETENTION_INTERVAL: ${PASSPORT_RETENTION_INTERVAL:-}
+      PASSPORT_RETENTION_BATCH_SIZE: ${PASSPORT_RETENTION_BATCH_SIZE:-}
+    tmpfs:
+      - /run/passport-ops:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001},size=1m
+    volumes:
+      - type: bind
+        source: ${PASSPORT_IMAGE_ROOT:-/__passport_image_root_required__}
+        target: /var/lib/passport/images
+        bind:
+          create_host_path: false
+    secrets:
+      - postgres_dsn
+    networks:
+      - private
+
+  technical-backup:
+    profiles: [ops]
+    image: passport-backend-ops:stage7
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    environment:
+      PASSPORT_OPS_UID: ${PASSPORT_APP_UID:-10001}
+      PASSPORT_OPS_GID: ${PASSPORT_APP_GID:-10001}
+      PASSPORT_TECHNICAL_BACKUP_API_STOPPED: ${PASSPORT_TECHNICAL_BACKUP_API_STOPPED:-false}
+    tmpfs:
+      - /run/passport-ops:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001},size=1m
+    volumes:
+      - type: bind
+        source: ${PASSPORT_TECHNICAL_BACKUP_DIR:-/__passport_backup_directory_required__}
+        target: /run/backup
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PASSPORT_TECHNICAL_BACKUP_KEY_FILE:-/__passport_backup_key_required__}
+        target: /run/secrets/backup_key
+        read_only: true
+        bind:
+          create_host_path: false
+    secrets:
+      - postgres_dsn
+    networks:
+      - private
+
+  technical-backup-keygen:
+    profiles: [ops]
+    image: passport-backend-ops:stage7
+    read_only: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: "no"
+    environment:
+      PASSPORT_OPS_UID: ${PASSPORT_APP_UID:-10001}
+      PASSPORT_OPS_GID: ${PASSPORT_APP_GID:-10001}
+    tmpfs:
+      - /run/passport-ops:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001},size=1m
+    volumes:
+      - type: bind
+        source: ${PASSPORT_TECHNICAL_BACKUP_KEY_DIR:-/__passport_backup_key_directory_required__}
+        target: /run/key-output
+        bind:
+          create_host_path: false
+    network_mode: none
+
+  api:
+    profiles: [queue]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.api
+    image: passport-backend-api:stage7
+    read_only: true
+    init: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PASSPORT_APP_UID: ${PASSPORT_APP_UID:-10001}
+      PASSPORT_APP_GID: ${PASSPORT_APP_GID:-10001}
+      PASSPORT_API_IP: ${PASSPORT_API_IP:-172.30.0.10}
+    volumes:
+      - type: bind
+        source: ${PASSPORT_API_CONFIG_FILE:-/dev/null}
+        target: /run/config/api.queue.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PASSPORT_IMAGE_ROOT:-/__passport_image_root_required__}
+        target: /var/lib/passport/images
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PASSPORT_API_STATE_ROOT:-/__passport_api_state_required__}
+        target: /var/lib/passport/state
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /run/passport-api:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001},size=16m
+    secrets:
+      - postgres_dsn
+      - broker_dsn
+      - client_credentials
+      - worker_credentials
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -T 3 -O /dev/null http://$${PASSPORT_API_IP}:8080/readyz"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 15s
+    networks:
+      private:
+        ipv4_address: ${PASSPORT_API_IP:-172.30.0.10}
+
+  ocr:
+    profiles: [queue]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.ocr
+    image: ${PASSPORT_OCR_IMAGE:?Set PASSPORT_OCR_IMAGE to the selected OCR worker image or digest}
+    read_only: true
+    init: true
+    user: "0:0"
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "/app/ocr/runtime/secret_bootstrap.py", "healthcheck", "/run/passport-ocr/worker-config.json"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10m
+    environment:
+      PASSPORT_WORKER_UID: ${PASSPORT_APP_UID:-10001}
+      PASSPORT_WORKER_GID: ${PASSPORT_APP_GID:-10001}
+      PASSPORT_OCR_CONFIG_FILE: /run/config/ocr-worker.json
+    volumes:
+      - type: bind
+        source: ${PASSPORT_OCR_CONFIG_FILE:-/dev/null}
+        target: /run/config/ocr-worker.json
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PASSPORT_IMAGE_ROOT:-/__passport_image_root_required__}
+        target: /var/lib/passport/images
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PASSPORT_RUSSIANDOCS_ROOT:-/__passport_russiandocs_required__}
+        target: /opt/russiandocs
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${PASSPORT_MODELS_ROOT:-/__passport_models_required__}
+        target: /opt/passport-models
+        read_only: true
+        bind:
+          create_host_path: false
+    tmpfs:
+      - /run/passport-ocr:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001},size=16m
+      - /var/lib/passport/ocr-work:mode=0700,uid=${PASSPORT_APP_UID:-10001},gid=${PASSPORT_APP_GID:-10001}
+    secrets:
+      - rabbitmq_password
+      - ocr_worker_token
+    networks:
+      private:
+        ipv4_address: ${PASSPORT_WORKER_IP:-172.30.0.11}
+
+secrets:
+  postgres_password:
+    file: ${PASSPORT_POSTGRES_PASSWORD_FILE:?Set PASSPORT_POSTGRES_PASSWORD_FILE to a private password file}
+  rabbitmq_password:
+    file: ${PASSPORT_RABBITMQ_PASSWORD_FILE:?Set PASSPORT_RABBITMQ_PASSWORD_FILE to a private password file}
+  postgres_dsn:
+    file: ${PASSPORT_POSTGRES_DSN_FILE:?Set PASSPORT_POSTGRES_DSN_FILE to a private DSN file}
+  broker_dsn:
+    file: ${PASSPORT_RABBITMQ_DSN_FILE:-/dev/null}
+  client_credentials:
+    file: ${PASSPORT_CLIENT_CREDENTIALS_FILE:-/dev/null}
+  worker_credentials:
+    file: ${PASSPORT_WORKER_CREDENTIALS_FILE:-/dev/null}
+  ocr_worker_token:
+    file: ${PASSPORT_OCR_WORKER_TOKEN_FILE:-/dev/null}
+
+volumes:
+  postgres_data:
+  rabbitmq_data:
+
+networks:
+  private:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${PASSPORT_PRIVATE_SUBNET:-172.30.0.0/24}
+          ip_range: ${PASSPORT_PRIVATE_DYNAMIC_POOL:-172.30.0.128/25}

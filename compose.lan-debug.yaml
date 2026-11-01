@@ -1,0 +1,22 @@
+services:
+  lan-debug-caddy:
+    profiles: [lan-debug]
+    build:
+      context: ./deploy/ingress
+      dockerfile: Dockerfile.lan-debug
+    image: passport-backend-ingress:lan-debug
+    read_only: true
+    init: true
+    user: "10001:10001"
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    tmpfs:
+      - /data:mode=0700,uid=10001,gid=10001,size=16m
+      - /config:mode=0700,uid=10001,gid=10001,size=1m
+    networks:
+      private:
+        ipv4_address: ${PASSPORT_LAN_DEBUG_INGRESS_IP:-172.30.0.21}

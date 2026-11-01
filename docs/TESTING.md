@@ -2,6 +2,83 @@
 
 Это план расширенной проверки качества и развёртывания. Текущий `cmd/api` запускает единственный RussianDocsOCR provider; прежние результаты full auto-VL, unit/process tests и native acceptance ниже относятся к удалённому production route и не проверяют текущую конфигурацию. Они не заменяют held-out evaluation, Android integration или production acceptance. Согласованного held-out набора нет.
 
+## PostgreSQL, migrations и image storage foundation (этап 2)
+
+На этом этапе проверяются PostgreSQL/RabbitMQ infrastructure, версия и повторяемость schema migrations, базовая job/attempt/outbox schema и приватный файловый storage foundation. Текущий `cmd/api` ещё не принимает jobs, не пишет в image store и не связывает файловую запись с транзакцией job/outbox. Поэтому infrastructure/storage tests не являются проверкой HTTP `202`, durable job acceptance, retry, consumer processing или восстановления accepted jobs. Эти сценарии остаются gates этапов 3–6.
+
+Stage 2 acceptance должна подтвердить readiness PostgreSQL/RabbitMQ; применение migration с чистой и уже актуальной схемой; структуру и ограничения job/attempt/outbox; и restart реального PostgreSQL container с сохранением schema и прямых test-fixture записей job/attempt/outbox. Для image store нужно проверить создание/чтение private object, opaque key, предельный размер, overwrite refusal, symlink/path traversal rejection и сохранение тех же bytes после close/reopen. Эти DB fixtures проверяют схему и disk durability без HTTP intake: согласованная транзакция upload/job/outbox, ответ `202`, consumer retry и восстановление принятой API job остаются последующими gates. Точные команды и результаты добавляются после проверки фактически подключённых compose/migration/storage interfaces; этот список сам по себе не означает, что проверки прошли.
+
+Локальный Go slice проверен на Go 1.25: `GOTOOLCHAIN=go1.25.0 go test ./... -count=1 -timeout=180s` завершился успешно для 12 packages. `GOTOOLCHAIN=go1.25.0 go vet ./...` также прошёл после удаления unreachable `return` в существующем helper package. Эти проверки включают unit/package tests для image store и migration metadata, но сами по себе не заменяют real PostgreSQL container test.
+
+Реальная PostgreSQL acceptance выполнена через [scripts/test-postgres-integration.sh](../scripts/test-postgres-integration.sh) на Docker Engine 29.5.2/aarch64, PostgreSQL `18.6-alpine3.24` и RabbitMQ `4.4.0-management-alpine`. Harness запускался в выделенном локальном unix-socket Docker context и собственном private secrets directory mode `0700` вне checkout; он не публиковал host ports. Повторить его можно так, задав существующий локальный Docker context и принадлежащий пользователю private каталог вне репозитория:
+
+```sh
+PASSPORT_TEST_DOCKER_CONTEXT=<local-unix-socket-context> \
+PASSPORT_TEST_SECRETS_ROOT=<owned-0700-directory-outside-checkout> \
+  ./scripts/test-postgres-integration.sh
+```
+
+Harness успешно поднял PostgreSQL/RabbitMQ с readiness checks, выполнил конкурентный `Migrate` через два подключения и повторное применение шести миграций, проверил таблицы и три partial indexes, checksum drift rejection/restore и schema constraints (19 ожидаемых отказов и валидные owner/lifecycle/outbox fixtures). Запущенный через Compose migration runner прошёл; после restart PostgreSQL сохранённые job и outbox fixtures прочитались (`TestPostgresRowsSurviveRestart` PASS). Test бинарник выполнялся внутри принадлежащего harness PostgreSQL container; RabbitMQ readiness проверена, публикация или доставка сообщений не проверялась. Harness удалил только собственный project и volume, затем свой secret directory. Этот результат подтверждает stage 2 PG/schema durability, но не intake transaction, HTTP `202`, RabbitMQ delivery, consumer recovery или общую Go/OCR Compose систему.
+
+## Durable HTTP intake (этап 3)
+
+Реальная stage 3 acceptance выполнена тем же изолированным harness после подключения `cmd/api` handler к реальному hashed Bearer registry, `jobintake.Service`, PostgreSQL и private filesystem image store. Проверка запускалась той же командой выше на Docker Engine 29.5.2/aarch64. В тестовый процесс передавался только временный private DSN-файл; client tokens генерировались внутри теста, в registry попадали только SHA-256 hashes, а тестовые credential files удалялись вместе с принадлежащими тесту каталогами.
+
+Прошли десять top-level PostgreSQL integration tests: schema/migration race и constraints, transactional repository, два прямых intake/service tests, пять tests реальной HTTP composition и persistence после restart PostgreSQL. HTTP acceptance проверила полный 202 envelope с ровно `job_id`, `status`, `status_url`, `created_at`, соответствующий `Location`, `Cache-Control: no-store` и echo request ID; по сохранённой строке сверены authenticated owner (поддельный `X-Owner-ID` проигнорирован), MIME, byte size и digest. Повтор того же owner/key/MIME/body вернул исходные job ID, state и время; изменённые bytes или MIME дали `409`; тот же ключ у другого authenticated owner создал отдельную job. При заполненном до лимита image volume исходный replay остался `202`, а новая загрузка получила `503` без job/outbox/file.
+
+Через реальный handler также проверены `401` для отсутствующего/неверного токена, `400` для отсутствующего ключа, `403` для peer вне ACL, `413` для upload cap, `415` для неподдерживаемого MIME и `503` для заполненного storage; эти отказные запросы не создали job, outbox или image. В actual HTTP concurrency-проверке 50 одинаковых запросов получили один job/outbox/file; 50 запросов с одним ключом и двумя payload дали один победивший job и `409` для конфликтующих bytes. Ещё 100 небольших уникальных POST вернули `202`, создали 100 jobs и 100 outbox rows без attempt rows; существующий синхронный `/v1/passport/recognize` сохранил `200`. Отдельные probes подтвердили retry после искусственной потери application acknowledgment уже committed операции и после прерывания HTTP response writer: оба retry нашли ту же запись и не добавили второй file/outbox. Тестовые логи проверены на отсутствие токена, owner, idempotency key, image sentinel и image-store path.
+
+Тестовые изображения были короткими синтетическими байтами, переданными с поддерживаемым заявленным MIME. Это подтверждает durable bounded intake и отсутствие OCR semaphore `429` для указанной серии; это не проверяет декодирование изображения, OCR, максимальную upload нагрузку, производительность, RabbitMQ publish/delivery или worker recovery. RabbitMQ прошёл startup readiness в Compose, сообщений тесты не публиковали. Harness использовал отдельный Compose project, private сеть и ephemeral named volumes без host ports; test binary исполнялся внутри принадлежащего project PostgreSQL container. Compose migration runner собрался и применил migrations, PostgreSQL перезапускался, schema/job/outbox persistence test прошёл. Stage 4 publisher/consumer, GET status route и end-to-end OCR остаются отдельными gates.
+
+## Outbox relay и controlled OCR delivery (этап 4)
+
+Финальная stage 4 интеграционная проверка выполнена 2026-10-31 командой выше в выделенном локальном Unix-socket Docker context, на Docker Engine 29.5.2/aarch64, PostgreSQL `18.6-alpine3.24` и RabbitMQ `4.4.0-management-alpine`. Полный вывод harness сохранён только в private temp directory; тестовые DSN/token файлы удалены вместе с уникальным Compose project и его volumes. Порты на host не публиковались. Финальный прогон завершился exit code 0.
+
+На реальных PostgreSQL и RabbitMQ прошли concurrent/repeated migration и constraints, transactional repository, семь lifecycle subtests, direct service/image-store cases, HTTP intake/negative/auth/idempotency/concurrency/quota/replay cases, outbox confirm/unroutable/lease-expiry behavior, 23 consumer disconnect redeliveries и relay reconnect после рестарта broker. Отдельные Compose сценарии подтвердили сохранность PostgreSQL rows после рестарта и сохранение durable intake во время недоступности RabbitMQ с последующей публикацией после восстановления broker. Compose migration runner запускался на той же выделенной БД.
+
+Тестирование обнаружило проверяемый PostgreSQL `jobs_check5` отказ (`updated_at >= finished_at`): terminal SQL вычислял два отдельных `clock_timestamp()`, для которых нет гарантированного порядка. Terminal job transition теперь берёт один materialized DB timestamp и присваивает его `finished_at` и `updated_at`; claim/attempt timestamps также зажимаются относительно уже сохранённого start time. Новый real-PG regression `TestPostgresTerminalTransitionsClampFutureTimestamps` прошёл для completed, failed и known-poison transitions; после исправления вся семипунктовая `TestPostgresExecutionLifecycle` матрица прошла 20 из 20 повторов на одной выделенной БД.
+
+End-to-end проверка использовала реальный POST handler, PostgreSQL, Go outbox relay, RabbitMQ, production Python consumer classes и настоящий Go private worker API. Вместо OCR pipeline использовалась явно тестовая синтетическая фикстура с null-полями; один job завершился с одной durable attempt и canonical result. Отдельный crash-window сценарий вызывает настоящий Go `complete`, затем немедленно завершает consumer процесс до AMQP `basic_ack`; RabbitMQ доставляет сообщение повторно с `redelivered=true`, новый worker получает terminal ACK от Go, очередь очищается, recognition повторно не вызывается, hash canonical result и единственная attempt остаются неизменными. Это проверяет потерю ACK после DB commit, но не означает OCR semantic acceptance.
+
+Этап 4 не проверяет распознавание настоящей моделью или реальными документами, точность полей, максимальный размер/throughput, production load/SLO, multi-node broker HA, strict FIFO или deployment-конфигурацию существующего image root. Synthetic controlled pipeline подтверждает delivery/commit/ACK boundary, но не production OCR output.
+
+## GET статуса задания (этап 5)
+
+Stage 5 прошёл 2026-10-31 на Docker Engine 29.5.2/aarch64 и PostgreSQL `18.6-alpine3.24` в отдельном lowercase Colima-профиле и ручном Unix-socket Docker context. Полный запуск завершился с exit code 0. Harness использовал только синтетические записи и временные токены в private каталоге `0700` вне checkout; Compose project, контейнеры, сеть и volumes удалены при завершении. API запускался с `async_jobs`, но без `queue_processing`; запуск не поднимал RabbitMQ или OCR consumer и не требовал моделей.
+
+Три integration tests прошли: `TestPostgresHTTPJobStatusOwnerIsolationAndFourStoredStates`, `TestPostgresHTTPJobStatusRejectsAuthBeforeRepositoryRead` и `TestPostgresHTTPJobStatusUnavailableWithoutReader`. Через собранный `cmd/api` и реальный PostgreSQL проверены 200 для queued, processing, completed и failed; отдельно проверен queued после планирования retry, где сохранённый `started_at` остаётся ненулевым. Для completed сверены persisted canonical JSON, `request_id` и исторический `pipeline_version`, отличающийся от текущей конфигурации API. Повторные чтения не изменили state, timestamps, attempts, result или число outbox rows.
+
+Реальный HTTP проверил два независимых client owner ID, чужую job и worker-only `pwt1_` credential. Отсутствующий/неверный/worker token вернул 401; тест с counting repository подтвердил, что неавторизованный запрос не читает status repository. Валидный foreign ID, отсутствующий UUID и malformed ID вернули одинаковый 404. Для успешных и отказных matched GET проверены `Cache-Control: no-store` и echo `X-Request-ID`; дополнительно проверены `405 Allow: GET`, прежний `405 Allow: POST` для коллекции и 404 для nested path. При синтаксически валидном, но неканоническом JSON в persisted result API вернул статический `503 job_status_unavailable` без содержимого fixture. После теста приватный API log проверен на отсутствие временных client/worker credentials и owner IDs.
+
+Пять фактических GET JSON ответов (включая retry-queued) прошли OpenAPI 3.0.3 `JobStatusResponse` `oneOf` и вложенные схемы. Шесть изменённых примеров были отклонены branch validation: queued с result, processing с error, completed без result, failed с result, неизвестный status и лишнее поле owner. Проверка использовала Python 3.14.7 и временное окружение с `openapi-spec-validator==0.9.0`, `openapi-schema-validator==0.9.0`, `PyYAML==6.0.3`; дубликаты YAML keys и весь OpenAPI spec также валидировались. Повторить только этот gate можно так:
+
+```sh
+PASSPORT_TEST_DOCKER_CONTEXT=<local-unix-socket-context> \
+PASSPORT_TEST_SECRETS_ROOT=<owned-0700-directory-outside-checkout> \
+PASSPORT_TEST_STATUS_ONLY=1 \
+  ./scripts/test-postgres-integration.sh
+```
+
+Использовались отдельная private сеть без опубликованных host ports, тестовая named image volume и временные private credentials. GET был связан с реальной API composition и PG rows; это не проверяет OCR semantic accuracy, RabbitMQ delivery, deployment существующего image root, retention policy или production нагрузку.
+
+## Регистрация клиентской установки и доступ по owner (этап 6)
+
+Stage 6 enrollment acceptance прошла 2026-10-31 на Docker Engine 29.5.2/aarch64 и PostgreSQL `18.6-alpine3.24`. Команда `PASSPORT_TEST_DOCKER_CONTEXT=<isolated-local-unix-socket-context> PASSPORT_TEST_SECRETS_ROOT=<owned-0700-directory-outside-checkout> ./scripts/test-postgres-integration.sh enrollment` завершилась с exit code 0. Использовались отдельный lowercase Colima-профиль, private каталог `0700` вне checkout и Compose project без опубликованных host ports; cleanup удалил проектные контейнеры, сеть, volumes и временные файлы. Global Docker context не переключался.
+
+`TestPostgresClientEnrollmentReplayAdmissionAndOwnerAuthentication` прошёл на реальном PostgreSQL и собранном `cmd/api`. Конфигурация включала `async_jobs.client_enrollment`, не задавала `async_jobs.credentials_file` и не включала `queue_processing`; Compose запускал PostgreSQL, RabbitMQ для инфраструктурной готовности, миграционный runner и API. OCR worker, модель и приватные OCR assets не запускались и не использовались. Миграционный image build проверен на allowlisted imports `clientauth`, `clientenrollment` и `jsonstrict`.
+
+HTTP проверил анонимную регистрацию SHA-256 hash с ответами `201` и повторным `200` с теми же `client_id`/`created_at`, без отражения hash или raw token. Лишнее поле owner и uppercase hash отклонены `400`; клиентский Bearer до регистрации и worker token получили `401`; разные установки получили разные owner IDs. Зарегистрированный клиент создал durable job и получил собственную queued status; запрос другой установки к этой job вернул `404`. После revoke credential больше не аутентифицировался, а повторная регистрация того же hash вернула `403`. 16 конкурентных повторов одного hash сошлись на одной записи; replay работал при заполненных admission limits, а новые установки блокировались независимо по client-count и rate caps. Использованные в тестовой конфигурации значения caps являются fixture-параметрами, не product defaults.
+
+Повторить только этот gate можно с выделенным local unix-socket Docker context и принадлежащим пользователю каталогом mode `0700` вне репозитория:
+
+```sh
+PASSPORT_TEST_DOCKER_CONTEXT=<local-unix-socket-context> \
+PASSPORT_TEST_SECRETS_ROOT=<owned-0700-directory-outside-checkout> \
+  ./scripts/test-postgres-integration.sh enrollment
+```
+
+Эта проверка подтверждает persistent enrollment, динамический token lookup, revocation и owner isolation в actual API composition. Она не проверяет Android credential persistence/registration UI, реальный OCR, production model quality, клиентский rollout, retention policy или production load.
+
 ## Набор данных и метрики
 
 - Получить разрешение и согласие на набор; определить доступ, минимизацию, хранение, удаление и запрет использования реальных сканов в Git/логах.

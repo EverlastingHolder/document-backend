@@ -24,11 +24,6 @@ import (
 
 const russianWorkerSchema = "passport-russiandocsocr-worker/v1"
 
-var russianWorkerFields = []string{
-	"surname", "given_name", "patronymic", "gender", "birth_date", "birth_place",
-	"series", "number", "issue_date", "issuer", "department_code",
-}
-
 type russianWorker struct {
 	config Config
 	gate   chan struct{}
@@ -321,20 +316,19 @@ func russianResponseStatusError(response russianResponse) error {
 }
 
 func extractionFromRussianResponse(response russianResponse, job workerJob, pipelineVersion string) (passport.Extraction, error) {
-	if !validRussianFields(response.Fields) {
+	extraction, err := RussianFieldsExtraction(job.ImageID, response.Fields)
+	if err != nil {
 		return passport.Extraction{}, errors.New(workerExitError)
 	}
-	values := make(map[string]*string, len(response.Fields))
-	for name, value := range response.Fields {
-		values[name] = value
-	}
-	extraction := passport.StructuredExtraction(job.ImageID, values)
 	if _, err := api.MapExtraction(extraction, job.ImageID, pipelineVersion); err != nil {
 		return passport.Extraction{}, errors.New(workerExitError)
 	}
 	return extraction, nil
 }
 
+// RussianFieldsExtraction validates and adapts the worker's exact eleven-field
+// payload into the shared internal extraction model. The public Go mapper
+// remains responsible for canonical response validation and serialization.
 func (w *russianWorker) startLocked(ctx context.Context) error {
 	w.mu.Unlock()
 	err := w.start(ctx)
@@ -379,21 +373,6 @@ func (w *russianWorker) close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.stopLocked()
-}
-
-func validRussianFields(fields map[string]*string) bool {
-	if fields == nil || len(fields) != len(russianWorkerFields) {
-		return false
-	}
-	for _, name := range russianWorkerFields {
-		if _, ok := fields[name]; !ok {
-			return false
-		}
-		if value := fields[name]; value != nil && (len(*value) > 4096 || strings.ContainsRune(*value, '\x00')) {
-			return false
-		}
-	}
-	return true
 }
 
 func decodeRussianResponse(data []byte) (russianResponse, error) {

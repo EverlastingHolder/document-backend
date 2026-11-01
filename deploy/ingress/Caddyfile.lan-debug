@@ -1,0 +1,38 @@
+{
+	admin off
+	auto_https off
+}
+
+:8080 {
+	@enroll {
+		method POST
+		path /v1/client-installations
+	}
+	@submit {
+		method POST
+		path /v1/passport/jobs
+	}
+	@status {
+		method GET
+		path_regexp job_status ^/v1/passport/jobs/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$
+	}
+	@receipt {
+		method POST
+		path_regexp job_receipt ^/v1/passport/jobs/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/receipt$
+	}
+	handle @enroll {
+		reverse_proxy api:8080
+	}
+	handle @submit {
+		reverse_proxy api:8080
+	}
+	handle @status {
+		reverse_proxy api:8080
+	}
+	handle @receipt {
+		reverse_proxy api:8080
+	}
+	handle {
+		respond "not found" 404
+	}
+}

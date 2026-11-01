@@ -1,0 +1,11 @@
+**
+!Dockerfile
+!Dockerfile.managed
+!Dockerfile.lan
+!Dockerfile.lan-debug
+!Caddyfile
+!Caddyfile.managed
+!Caddyfile.lan
+!Caddyfile.lan-debug
+!entrypoint.sh
+!entrypoint-managed.sh
