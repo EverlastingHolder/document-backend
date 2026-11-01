@@ -1,73 +1,37 @@
 openapi: 3.0.3
 info:
-  title: Passport Recognition API
+  title: API распознавания документов
   version: 0.5.0
   description: >-
-    Selected public contract for OCR-assisted recognition of a Russian internal
-    passport spread. The Go response mapper, HTTP handler, local server command
-    and private recognizer wiring are implemented. The command requires explicit
-    runtime limits, a nonempty caller-supplied client CIDR allowlist and a
-    numeric local bind address. It checks the direct TCP peer and does not trust
-    forwarding headers. The private recognizer invokes one RussianDocsOCR
-    worker and maps its structured fields into the canonical Go result; Python has no
-    public ingress. The handler validates multipart structure, declared media
-    type and configured size limits; the recognizer separately decodes image
-    bytes and enforces a pixel cap. Recognition output is unconfirmed and
-    requires human review. Identity authentication for the legacy synchronous
-    routes, TLS,
-    Internet proxying and universal production limits are not implemented or
-    selected. Stage 3 asynchronous POST intake passed its bounded
-    PostgreSQL/filesystem/HTTP acceptance gate. Stage 4 outbox relay, private
-    worker API, OCR consumer lifecycle and delivery/recovery passed controlled
-    PostgreSQL/RabbitMQ integration. This does not establish production
-    deployment readiness or OCR quality on the operator-selected private model
-    snapshot. Queue processing requires Go queue_processing configuration and a
-    running private consumer; accepted jobs remain queued when only async_jobs
-    intake is configured. The owner-scoped public job-status GET passed bounded real PostgreSQL/API
-    acceptance. Hash-only client installation enrollment and Android
-    enrollment/upload/polling acceptance through a synthetic HTTP fixture are
-    complete. This does not claim a live Android-to-Go-to-Python OCR run or
-    production rollout. Production rollout is separate.
-    Async job routes use individual per-installation opaque bearer tokens.
-    Anonymous installation enrollment stores only the token hash and a random
-    client ID; it is not a user account or verified identity. A legacy static
-    hash registry remains optional. Job retention duration and
-    processing deadline policy remain open. The handler
-    exposes a cumulative privacy-filtered statistics snapshot at GET /v1/stats.
-    It uses the same direct-peer CIDR allowlist. Statistics are aggregate
-    counters retained across restarts, not request history or a time series.
+    Контракт API для распознавания изображений документов, асинхронной обработки
+    и агрегированной статистики. Результат распознавания является кандидатом
+    и требует проверки человеком. Доступ ограничивается адресом клиента и
+    настройками сервера.
+
+    Общие ошибки в ответах default: 400 — некорректный запрос, заголовок или тело;
+    401 — токен отсутствует или недействителен в защищённых операциях; 403 —
+    доступ запрещён настройками сервера или состоянием токена при регистрации;
+    405 — неподдерживаемый метод (заголовок Allow указан только при 405); 503 —
+    операция временно недоступна. Специальные ошибки указаны рядом с операцией.
 servers:
   - url: /
-    description: >-
-      Relative server URL; the caller supplies a numeric local bind address,
-      port and explicit client CIDRs. No deployment endpoint or defaults are set.
+    description: Относительный адрес. Адрес, порт и список разрешённых сетей задаются при запуске сервера.
 paths:
   /v1/client-installations:
     post:
       operationId: enrollClientInstallation
-      summary: Register a client-generated installation credential hash
+      summary: Зарегистрировать установку клиента
       description: >-
-        Anonymous installation enrollment without login. The client generates
-        a high-entropy `pbt1_` credential and persists it in encrypted private
-        storage before sending only its lowercase SHA-256 hash here. The raw
-        credential is never sent to this operation, returned by the server, or
-        stored in PostgreSQL. The server creates an opaque stable client UUID
-        for this credential; this is an installation principal, not a user
-        account or verified identity. Repeating the same hash returns the same
-        client ID and original creation time. A credential in the optional
-        legacy static registry or a revoked database record cannot be enrolled.
-        The endpoint is still subject to the configured direct-peer CIDR ACL
-        and positive operator-configured `max_clients` and
-        `max_new_clients_per_minute` limits. Release traffic carrying client
-        credentials requires HTTPS; explicitly enabled local debug HTTP is not
-        a production transport. Enrollment is unavailable when its optional
-        server configuration is absent.
+        Принимает SHA-256 хеш созданного клиентом токена и возвращает постоянный
+        идентификатор установки. Сам токен не передаётся и не сохраняется.
+        Повторный запрос с тем же хешем возвращает прежний идентификатор.
+        Операция доступна при включённой конфигурации регистрации.
       security: []
       parameters:
         - name: X-Request-ID
           in: header
           required: false
-          description: Optional request correlation UUID.
+          description: Необязательный идентификатор запроса в формате UUID.
           schema: {type: string, format: uuid}
       requestBody:
         required: true
@@ -77,62 +41,29 @@ paths:
               $ref: '#/components/schemas/ClientInstallationRequest'
       responses:
         '201':
-          description: A new installation credential hash was durably registered.
+          description: Регистрация установки выполнена.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
             Cache-Control:
-              description: Prevents caching of enrollment responses.
+              description: Запрещает кэширование ответа.
               schema: {type: string, enum: [no-store]}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ClientInstallationResponse'}
         '200':
-          description: Exact replay; the original client ID and creation time are returned.
+          description: Повторная регистрация. Возвращены прежние идентификатор и дата.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
             Cache-Control:
-              description: Prevents caching of enrollment responses.
+              description: Запрещает кэширование ответа.
               schema: {type: string, enum: [no-store]}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ClientInstallationResponse'}
-        '400':
-          description: invalid_request; hash is missing/malformed or the JSON body has extra/duplicate fields.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-            Cache-Control:
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ClientInstallationErrorResponse'}
-        '403':
-          description: access_denied; ACL denies the peer or the hash is reserved/revoked.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-            Cache-Control:
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ClientInstallationErrorResponse'}
-        '405':
-          description: method_not_allowed; only POST is supported.
-          headers:
-            Allow:
-              description: The supported method for this resource.
-              schema: {type: string, enum: [POST]}
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-            Cache-Control:
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ClientInstallationErrorResponse'}
         '429':
-          description: registration_rate_limited; a positive operator-configured enrollment cap was reached.
+          description: Превышен настроенный лимит регистрации.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -141,233 +72,17 @@ paths:
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ClientInstallationErrorResponse'}
-        '503':
-          description: client_registration_unavailable; registration is disabled, timed out or storage is unavailable.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-            Cache-Control:
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/ClientInstallationErrorResponse'}
-  /v1/passport/recognize:
-    post:
-      operationId: recognizePassport
-      summary: Recognize a passport spread image
-      description: >-
-        Accepts one image of the full passport spread after client-side preview,
-        crop, and rotation. A successful response means processing completed,
-        not that extracted values are correct. The client must present every
-        field for human review. No raw OCR lines, internal candidates, evidence,
-        context, MRZ diagnostics, or calibrated confidence scores are returned.
-        The server composition is configured for direct local-network access;
-        it matches the TCP peer address against caller-supplied CIDRs and ignores
-        X-Forwarded-For and X-Real-IP.
-      parameters:
-        - name: X-Request-ID
-          in: header
-          required: false
-          description: >-
-            One optional UUID. A single valid value is echoed in every written
-            response. A malformed or repeated value produces 400 invalid_request;
-            the response uses a newly generated UUID and never reflects the input.
-          schema:
-            type: string
-            format: uuid
-      requestBody:
-        required: true
-        content:
-          multipart/form-data:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [file]
-              properties:
-                file:
-                  type: string
-                  format: binary
-                  description: >-
-                    Exactly one file part named file containing the full passport
-                    spread. No other form parts are accepted. The declared
-                    Content-Type must be image/jpeg, image/png or image/webp;
-                    the HTTP handler does not decode the image.
-            encoding:
-              file:
-                contentType: image/jpeg, image/png, image/webp
-      responses:
-        '200':
-          description: >-
-            Processing completed; field values remain unconfirmed. Completion
-            may include no non-null field values; in that case the response
-            includes the no_fields_recognized warning. The implemented Go mapper
-            applies this condition after filtering invalid values; the response
-            schema cannot enforce the cross-field condition by itself.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RecognitionResponse'
-              examples:
-                allFieldsRecognized:
-                  $ref: '#/components/examples/allFieldsRecognized'
-                partialResult:
-                  $ref: '#/components/examples/partialResult'
-                noFieldsRecognized:
-                  $ref: '#/components/examples/noFieldsRecognized'
-        '400':
-          description: >-
-            invalid_request: malformed multipart, missing/empty/duplicate file,
-            unexpected form part, malformed/duplicate X-Request-ID, or invalid
-            request structure. For invalid request IDs, a new UUID is returned.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: >-
-            access_denied: for a valid route, method, request ID and active
-            request context, the direct TCP peer address is outside the
-            caller-supplied client CIDR allowlist. This check happens before the
-            upload body is read or a concurrency slot is acquired. Forwarded
-            address headers are ignored; this is network filtering, not identity
-            authentication.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '413':
-          description: >-
-            upload_too_large: file or bounded multipart body exceeds the
-            configured upload limit. The caller must supply a positive limit;
-            no numeric production default is selected.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '415':
-          description: >-
-            unsupported_media_type — missing or unsupported declared file media type.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '422':
-          description: >-
-            image_unprocessable: the recognizer reports that the uploaded bytes
-            cannot be decoded as the declared supported image type or processed
-            within its image limits. The handler itself only validates multipart
-            structure and declared media type; lack of recognized fields alone
-            never selects this status.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-              examples:
-                imageUnprocessable:
-                  $ref: '#/components/examples/imageUnprocessable'
-        '429':
-          description: >-
-            concurrency_limit_reached: configured concurrent upload/recognition
-            capacity is occupied. This handler limit is concurrency-only; no
-            rate/QPS policy is selected.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '500':
-          description: >-
-            processing_failed — unexpected recognizer or invalid internal-result failure.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: >-
-            ocr_unavailable: the private provider or configured local runtime is
-            unavailable, including a missing runtime asset, unsupported provider
-            platform or worker launch failure. Dynamic child diagnostics and OCR
-            data are not included in this public response.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '504':
-          description: >-
-            processing_timeout: recognizer deadline exceeded. The timeout is a
-            required caller configuration value; no numeric production default
-            is selected.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          $ref: '#/components/responses/ClientInstallationDefaultError'
   /v1/passport/jobs:
     post:
       operationId: submitPassportJob
-      summary: Submit an asynchronous passport recognition job
+      summary: Создать задание распознавания
       description: >-
-        STAGES 3 AND 4 ACCEPTED FOR CONTROLLED INTEGRATION. The existing
-        synchronous /v1/passport/recognize operation remains unchanged. Job
-        acceptance is available only when optional
-        async_jobs server configuration is enabled; otherwise this operation
-        returns 503. Stage 4 delivery/recovery passed controlled real
-        PostgreSQL/RabbitMQ integration, including duplicate delivery and
-        ACK-loss recovery. This is not production deployment or real-weight OCR
-        quality acceptance. OCR processing additionally requires
-        queue_processing server configuration and a running private consumer;
-        with async_jobs alone accepted jobs remain queued. The public status GET
-        is implemented and passed its stage 5 acceptance gate. This operation
-        accepts the same single multipart file and validation limits. The
-        authenticated principal is the job owner; ownership is never accepted
-        from request fields, the client network address, or forwarding headers.
-        A durable 202 is returned only after the image has been persisted and
-        the job plus outbox record have committed in one database transaction.
-        This acknowledges durable acceptance, not OCR completion. The response
-        reports the current state at response time. Its status_url identifies
-        the implemented stage 5 status resource.
-        Repeating the same owner-scoped key with the same request returns the
-        same job from its technical idempotency tombstone, including after a
-        terminal state and result cleanup. The tombstone currently has no expiry.
-        Reusing that key for different request content returns 409. The key is 1-128
-        visible ASCII characters. The request digest covers exact image bytes
-        and the normalized media type; this version accepts no other multipart
-        fields. The image is removed after terminal OCR; canonical terminal
-        results are removed after receipt ACK or fixed 15 minute terminal
-        retention, while minimal idempotency tombstones remain. If a database
-        failure makes commit outcome uncertain, the server returns 503 and
-        retains the image for safety.
-        Async upload concurrency waits on its own bounded semaphore and can be
-        canceled with the request; it does not use the synchronous OCR
-        fail-fast 429 concurrency gate.
+        Принимает изображение и создаёт асинхронное задание. Ответ 202 означает,
+        что задание принято, но обработка ещё не завершена. Для обработки
+        требуется включённая очередь и запущенный обработчик. Повтор с тем же
+        ключом идемпотентности возвращает то же задание.
       security:
         - bearerAuth: []
       parameters:
@@ -375,13 +90,9 @@ paths:
           in: header
           required: true
           description: >-
-            Random opaque technical identifier scoped to the authenticated
-            owner; clients MUST NOT include personal, passport, or document text.
-            Between 1 and 128 visible ASCII characters (0x21-0x7E). Same key
-            and request returns the same job from the retained technical
-            tombstone; different content returns 409 idempotency_conflict.
-            Missing or invalid keys return 400. The supplied key is retained as
-            technical metadata and may be present in an encrypted technical backup.
+            Случайный ключ запроса длиной от 1 до 128 печатных ASCII-символов.
+            Не включайте в него персональные данные. Повтор с тем же ключом и
+            содержимым возвращает прежнее задание; другое содержимое даёт 409.
           schema:
             type: string
             minLength: 1
@@ -390,7 +101,7 @@ paths:
         - name: X-Request-ID
           in: header
           required: false
-          description: Optional request correlation UUID; not an owner identity.
+          description: Необязательный UUID запроса. Повторный заголовок отклоняется; UUID не определяет владельца.
           schema:
             type: string
             format: uuid
@@ -406,25 +117,16 @@ paths:
                 file:
                   type: string
                   format: binary
-                  description: Same full-spread image input as synchronous recognition.
+                  description: Изображение документа.
             encoding:
               file:
                 contentType: image/jpeg, image/png, image/webp
       responses:
         '202':
-          description: >-
-            Job and outbox entry are durably committed and the image is
-            persisted. When queue_processing is configured, the Go relay may
-            publish the event and a running private consumer may start OCR;
-            without it, the job remains queued. This response acknowledges
-            durable acceptance, not OCR completion. Stage 4 controlled
-            delivery/recovery integration has passed. The status value is
-            current when this response is generated. status_url and Location
-            identify the available stage 5 status resource. GET still requires
-            configured async service and the caller bearer credential.
+          description: Задание принято. Распознавание может начаться позже; ответ содержит его текущее состояние и адрес проверки статуса.
           headers:
             Location:
-              description: Relative path for the available owner-scoped status resource.
+              description: Адрес проверки статуса задания.
               schema: {type: string, format: uri-reference}
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -432,70 +134,31 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JobAcceptedResponse'
-        '400':
-          description: invalid_request; malformed upload or missing/invalid Idempotency-Key.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '401':
-          description: unauthorized; bearer credential is missing or invalid.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '403':
-          description: access_denied; existing configured network ACL denies the direct peer.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
         '409':
-          description: idempotency_conflict; key is already bound to different request content.
+          description: Ключ идемпотентности уже использован с другим содержимым.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
         '413':
-          description: upload_too_large; the existing configured upload limit was exceeded.
+          description: Размер файла или запроса превышает настроенный лимит.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
         '415':
-          description: unsupported_media_type; declared file type is not supported.
+          description: Тип файла не поддерживается.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '503':
-          description: >-
-            job_acceptance_unavailable; async intake is disabled, storage is
-            unavailable/full, or acceptance/commit outcome is uncertain. No
-            202 is claimed for an uncertain commit.
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
+        default:
+          $ref: '#/components/responses/AsyncSubmissionDefaultError'
   /v1/passport/jobs/{job_id}:
     get:
       operationId: getPassportJob
-      summary: Read the current state of an owned recognition job
+      summary: Получить статус задания
       description: >-
-        Stage 5 implementation and bounded real PostgreSQL/API acceptance passed.
-        Stage 7 retention, receipt, revocation, readiness, aggregate snapshot,
-        technical-backup, and LAN cutover checks passed. Durable configuration
-        was promoted and the API runs at 192.168.1.91:8080 behind private Caddy;
-        start/status/stop passed and the previous listener is stopped. TLS
-        configuration and a trusted test-certificate rehearsal passed, but no
-        production domain/certificate was activated. Real OCR inference/quality
-        and capacity are not established by these checks; no queued-job deadline
-        or SLA is promised.
-        The bearer-authenticated principal must own the job. Missing, malformed,
-        and jobs belonging to another principal all return 404 not_found to avoid
-        revealing their existence. A failed OCR job is still returned with HTTP
-        200 and a safe terminal error in the response body. Responses use
-        Cache-Control: no-store. A terminal result is deleted on owner receipt or
-        15 minutes after terminal state; GET returns 410 after durable deletion,
-        even before the maintenance loop runs. Images are removed after terminal
-        OCR with retry after filesystem failures. Technical idempotency
-        tombstones remain; this endpoint does not expose a job list or history.
-        Android enrollment/upload/polling was accepted with a synthetic HTTP
-        fixture, not a live Go/Python OCR deployment. Production rollout remains
-        separate.
+        Возвращает статус задания и, после завершения, результат или ошибку.
+        Доступно владельцу задания. Для отсутствующих и чужих заданий
+        возвращается 404. Удалённый результат возвращает 410.
       security:
         - bearerAuth: []
       parameters:
@@ -509,102 +172,45 @@ paths:
           schema: {type: string, format: uuid}
       responses:
         '200':
-          description: Current state for a job owned by the authenticated principal.
+          description: Текущее состояние задания.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
             Cache-Control:
-              description: Prevents caching of owner-scoped job status and OCR result.
+              description: Запрещает кэширование статуса и результата.
               schema: {type: string, enum: [no-store]}
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/JobStatusResponse'
-        '401':
-          description: unauthorized; bearer credential is missing or invalid.
-          headers:
-            Cache-Control:
-              description: Prevents caching of status responses.
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '403':
-          description: access_denied; the TCP peer is outside the configured ACL.
-          headers:
-            Cache-Control:
-              description: Prevents caching of status responses.
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
         '404':
-          description: not_found; ID is malformed, job does not exist, or is not owned by the caller.
+          description: Задание не найдено или недоступно.
           headers:
             Cache-Control:
-              description: Prevents caching of status responses.
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '405':
-          description: method_not_allowed; only GET is supported.
-          headers:
-            Allow:
-              description: The supported method for this resource.
-              schema: {type: string, enum: [GET]}
-            Cache-Control:
-              description: Prevents caching of status responses.
-              schema: {type: string, enum: [no-store]}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '503':
-          description: job_status_unavailable; status storage/configuration is unavailable or the bounded read timed out.
-          headers:
-            Cache-Control:
-              description: Prevents caching of status responses.
+              description: Запрещает кэширование ответа.
               schema: {type: string, enum: [no-store]}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
         '410':
-          description: >-
-            job_result_gone; the terminal result was acknowledged by the owner
-            or exceeded the fixed 15 minute retention. The technical job record
-            remains for idempotency.
+          description: Результат задания удалён.
           headers:
             Cache-Control:
-              description: Prevents caching of status responses.
+              description: Запрещает кэширование ответа.
               schema: {type: string, enum: [no-store]}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
+        default:
+          $ref: '#/components/responses/AsyncStatusDefaultError'
   /v1/passport/jobs/{job_id}/receipt:
     post:
       operationId: acknowledgePassportJobResult
-      summary: Acknowledge application of a terminal result to the live client UI
+      summary: Подтвердить получение результата
       description: >-
-        Call after the client has applied the terminal result to its live
-        in-memory UI state. The selected Android privacy policy keeps operational
-        image/document upload, job state and result payloads only in process
-        memory; process death does not restore or re-upload them. Explicit 7z
-        export is separate, assembled in memory and streamed through a private
-        ContentProvider. Export verification passed; a receiving app or
-        recipient may choose to save a copy. The RAM-only
-        capture/upload/job/result correction passed 73 JVM tests and 19
-        instrumented tests, plus lint and debug and release builds.
-        The final APK was not installed on the user's physical phone;
-        the server URL and hidden installation credential remain persisted as
-        connection settings; the credential is protected by Android Keystore.
-        Document data, jobs, results and export remain RAM-only.
-        The empty-body request uses the
-        same bearer principal and owner scoping as status GET. A first or
-        repeated ACK returns 204 and removes the canonical result. A queued or
-        processing job returns 409. Malformed, missing and foreign IDs return
-        the same 404. Images are removed after terminal OCR, with retries after
-        filesystem errors. Fixed result expiry is 15 minutes from terminal
-        state. This is not cancellation or history.
+        Вызовите после применения результата в клиенте. Удаляет результат
+        задания; повторный вызов также возвращает успешный ответ. Для задания,
+        обработка которого ещё не завершена, возвращается 409.
       security:
         - bearerAuth: []
       parameters:
@@ -618,90 +224,47 @@ paths:
           schema: {type: string, format: uuid}
       responses:
         '204':
-          description: Receipt accepted or result already purged.
+          description: Получение подтверждено или результат уже удалён.
           headers:
             Cache-Control:
-              description: Prevents caching of receipt responses.
+              description: Запрещает кэширование ответа.
               schema: {type: string, enum: [no-store]}
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
-        '400':
-          description: invalid_request; receipt body must be empty.
-          headers:
-            Cache-Control: {schema: {type: string, enum: [no-store]}}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '401':
-          description: unauthorized; bearer credential is missing or invalid.
-          headers:
-            Cache-Control: {schema: {type: string, enum: [no-store]}}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '403':
-          description: access_denied; the TCP peer is outside the configured ACL.
-          headers:
-            Cache-Control: {schema: {type: string, enum: [no-store]}}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
         '404':
-          description: not_found; malformed, absent, or foreign job ID.
+          description: Задание не найдено или недоступно.
           headers:
-            Cache-Control: {schema: {type: string, enum: [no-store]}}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '405':
-          description: method_not_allowed; only POST is supported.
-          headers:
-            Allow: {schema: {type: string, enum: [POST]}}
             Cache-Control: {schema: {type: string, enum: [no-store]}}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
         '409':
-          description: job_not_terminal; a receipt is accepted only after terminal state.
+          description: Подтвердить можно только завершённое задание.
           headers:
             Cache-Control: {schema: {type: string, enum: [no-store]}}
           content:
             application/json:
               schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
-        '503':
-          description: job_status_unavailable; authentication or receipt storage is unavailable.
-          headers:
-            Cache-Control: {schema: {type: string, enum: [no-store]}}
-          content:
-            application/json:
-              schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
+        default:
+          $ref: '#/components/responses/AsyncReceiptDefaultError'
   /v1/stats:
     get:
       operationId: getStatistics
-      summary: Read cumulative service statistics
+      summary: Получить статистику
       description: >-
-        Returns a bounded cumulative aggregate snapshot from persistent local
-        state. Access uses the same direct TCP peer CIDR allowlist as recognition.
-        The snapshot contains no request IDs, image data, OCR text, or per-request
-        records. Counters are cumulative since the first state file was created;
-        this endpoint does not expose a time series or permit rate calculations
-        from a single response. Histogram buckets are cumulative, and mean
-        duration can be derived as sum_ms/count when count is nonzero. No p95 is
-        reported because retained aggregates cannot yield an exact percentile.
+        Возвращает накопительные агрегаты запросов и распознавания. Ответ не
+        содержит данные отдельных запросов или изображений.
       parameters:
         - name: X-Request-ID
           in: header
           required: false
-          description: >-
-            One optional UUID. A single valid value is echoed in every written
-            response. A malformed or repeated value produces 400 invalid_request;
-            the response uses a newly generated UUID and never reflects the input.
+          description: Некорректный или повторяющийся заголовок X-Request-ID вызывает ошибку 400.
           schema:
             type: string
             format: uuid
       responses:
         '200':
-          description: Cumulative aggregate statistics snapshot.
+          description: Снимок накопительной статистики.
           headers:
             X-Request-ID:
               $ref: '#/components/headers/RequestID'
@@ -709,79 +272,96 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StatisticsResponse'
-        '400':
-          description: >-
-            invalid_request: malformed or duplicate X-Request-ID.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '403':
-          description: >-
-            access_denied: the direct TCP peer is outside the configured client
-            CIDR allowlist. Forwarded address headers are ignored.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '405':
-          description: method_not_allowed; only GET is supported.
-          headers:
-            Allow:
-              schema:
-                type: string
-                enum: [GET]
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: >-
-            statistics_unavailable: statistics are not available in this handler
-            composition. State read and persistence failures during normal
-            operation are reported through the snapshot persistence health field;
-            this response does not expose filesystem details.
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestID'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+        default:
+          $ref: '#/components/responses/StatisticsDefaultError'
 components:
   securitySchemes:
     bearerAuth:
       type: http
       scheme: bearer
       description: >-
-        Async job routes use one opaque per-installation credential: `pbt1_`
-        followed by 32 random bytes encoded as unpadded base64url (48
-        characters total). The Android client creates and encrypts the token
-        before anonymous installation enrollment and reuses it on retries.
-        Enrollment sends only the SHA-256 hash and returns a random client UUID;
-        it does not create a user account or verify a person. PostgreSQL stores
-        only the hash and client ID. An optional private static hash registry
-        remains supported for existing provisioned clients and worker tokens
-        use a separate purpose-specific scheme. Raw tokens are not stored in
-        server config, logs, database or Git. The bearer credential is not a
-        substitute for TLS on untrusted networks.
+        Токен доступа для асинхронных операций. Передавайте его в заголовке
+        Authorization: Bearer. Для незащищённых сетей используйте HTTPS.
   headers:
     RequestID:
-      description: >-
-        Correlation UUID matching request_id in the JSON response. Valid client
-        IDs are echoed; absent IDs are generated; invalid/duplicate IDs receive
-        a newly generated UUID in the 400 response.
+      description: UUID запроса. Если заголовок отсутствует, некорректен или повторяется, сервер создаёт новый.
       schema:
         type: string
         format: uuid
+  responses:
+    ClientInstallationDefaultError:
+      description: Общий ответ об ошибке; коды и область применения перечислены в общей секции.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          description: Запрещает кэширование ответа.
+          schema: {type: string, enum: [no-store]}
+        Allow:
+          description: Передаётся только при статусе 405.
+          schema: {type: string, enum: [POST]}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ClientInstallationErrorResponse'}
+    AsyncSubmissionDefaultError:
+      description: Общий ответ об ошибке; коды и область применения перечислены в общей секции.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Allow:
+          description: Передаётся только при статусе 405.
+          schema: {type: string, enum: [POST]}
+        WWW-Authenticate:
+          description: Передаётся только при статусе 401.
+          schema: {type: string, example: 'Bearer realm="passport-jobs"'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
+    AsyncStatusDefaultError:
+      description: Общий ответ об ошибке; коды и область применения перечислены в общей секции.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          description: Запрещает кэширование ответа.
+          schema: {type: string, enum: [no-store]}
+        Allow:
+          description: Передаётся только при статусе 405.
+          schema: {type: string, enum: [GET]}
+        WWW-Authenticate:
+          description: Передаётся только при статусе 401.
+          schema: {type: string, example: 'Bearer realm="passport-jobs"'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
+    AsyncReceiptDefaultError:
+      description: Общий ответ об ошибке; коды и область применения перечислены в общей секции.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Cache-Control:
+          description: Запрещает кэширование ответа.
+          schema: {type: string, enum: [no-store]}
+        Allow:
+          description: Передаётся только при статусе 405.
+          schema: {type: string, enum: [POST]}
+        WWW-Authenticate:
+          description: Передаётся только при статусе 401.
+          schema: {type: string, example: 'Bearer realm="passport-jobs"'}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/AsyncErrorResponse'}
+    StatisticsDefaultError:
+      description: Общий ответ об ошибке; коды и область применения перечислены в общей секции.
+      headers:
+        X-Request-ID:
+          $ref: '#/components/headers/RequestID'
+        Allow:
+          description: Передаётся только при статусе 405.
+          schema: {type: string, enum: [GET]}
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ErrorResponse'}
   schemas:
     ClientInstallationRequest:
       type: object
@@ -793,7 +373,7 @@ components:
           minLength: 64
           maxLength: 64
           pattern: '^[0-9a-f]{64}$'
-          description: SHA-256 of the complete client-generated pbt1_ credential. The raw credential must never be sent here.
+          description: SHA-256 хеш токена клиента. Сам токен передавать нельзя.
     ClientInstallationResponse:
       type: object
       additionalProperties: false
@@ -810,16 +390,14 @@ components:
         status:
           type: string
           enum: [queued, processing, completed, failed]
-          description: Current job state when the response is generated.
+          description: Текущее состояние задания при формировании ответа.
         status_url:
           type: string
           format: uri-reference
-          description: Relative path for the owner-scoped status resource.
+          description: Адрес проверки статуса задания.
         created_at: {type: string, format: date-time}
     JobStatusResponse:
-      description: >-
-        Current state of one owned job. The terminal result reuses the existing
-        canonical RecognitionResponse without exposing OCR internals.
+      description: Статус задания и результат после завершения обработки.
       oneOf:
         - {$ref: '#/components/schemas/QueuedJobStatus'}
         - {$ref: '#/components/schemas/ProcessingJobStatus'}
@@ -886,11 +464,11 @@ components:
         code:
           type: string
           enum: [image_unprocessable, processing_failed, ocr_unavailable, processing_timeout]
-          description: Stable safe terminal OCR failure category.
+          description: Код ошибки обработки.
         message:
           type: string
           minLength: 1
-          description: Static safe text without OCR data, paths, diagnostics, or PII.
+          description: Краткое сообщение об ошибке.
     StatisticsResponse:
       type: object
       additionalProperties: false
@@ -1026,19 +604,19 @@ components:
         request_id:
           type: string
           format: uuid
-          description: Echoed client request ID, or server-generated UUID.
+          description: UUID запроса.
         status:
           type: string
           enum: [completed]
-          description: Processing state only; does not assert recognition correctness.
+          description: Статус обработки.
         review_required:
           type: boolean
           enum: [true]
-          description: Every returned field must be checked by a person.
+          description: Требуется проверка человеком.
         pipeline_version:
           type: string
           minLength: 1
-          description: Non-empty identifier for the extraction pipeline and model set.
+          description: Идентификатор версии конвейера обработки.
         fields:
           type: object
           additionalProperties: false
@@ -1059,19 +637,17 @@ components:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
                 - $ref: '#/components/schemas/NameFieldResult'
-              description: Name string; do not rewrite by dictionary or guess.
+              description: Фамилия без изменений.
             given_name:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
                 - $ref: '#/components/schemas/NameFieldResult'
-              description: Name string; do not rewrite by dictionary or guess.
+              description: Имя без изменений.
             patronymic:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
                 - $ref: '#/components/schemas/NameFieldResult'
-              description: >-
-                Always-present key. Null is valid and does not establish whether
-                the source document contains a patronymic.
+              description: Ключ всегда присутствует. Значение может быть null.
             gender:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
@@ -1081,17 +657,17 @@ components:
                       type: string
                       nullable: true
                       enum: [M, F, null]
-              description: Canonical non-null value is M or F.
+              description: "Значения: M или F."
             birth_date:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
                 - $ref: '#/components/schemas/DateFieldResult'
-              description: Calendar-valid date in YYYY-MM-DD form.
+              description: Дата в формате YYYY-MM-DD.
             birth_place:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
                 - $ref: '#/components/schemas/NonEmptyStringFieldResult'
-              description: Non-empty string without dictionary-based guessing.
+              description: Место рождения.
             series:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
@@ -1101,7 +677,7 @@ components:
                       type: string
                       nullable: true
                       pattern: '^[0-9]{4}$'
-              description: Four-digit string; leading zeroes are preserved.
+              description: Четыре цифры. Начальные нули сохраняются.
             number:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
@@ -1111,17 +687,17 @@ components:
                       type: string
                       nullable: true
                       pattern: '^[0-9]{6}$'
-              description: Six-digit string; leading zeroes are preserved.
+              description: Шесть цифр. Начальные нули сохраняются.
             issue_date:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
                 - $ref: '#/components/schemas/DateFieldResult'
-              description: Calendar-valid date in YYYY-MM-DD form.
+              description: Дата в формате YYYY-MM-DD.
             issuer:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
                 - $ref: '#/components/schemas/NonEmptyStringFieldResult'
-              description: Non-empty string without dictionary-based guessing.
+              description: Наименование органа, выдавшего документ.
             department_code:
               allOf:
                 - $ref: '#/components/schemas/FieldResult'
@@ -1131,10 +707,10 @@ components:
                       type: string
                       nullable: true
                       pattern: '^[0-9]{3}-[0-9]{3}$'
-              description: Six digits in the form 000-000.
+              description: Шесть цифр в формате 000-000.
         warnings:
           type: array
-          description: Always-present non-field-specific warnings; use [] when none apply.
+          description: Общие предупреждения. Пустой список, если их нет.
           items:
             $ref: '#/components/schemas/RecognitionWarning'
     FieldResult:
@@ -1146,9 +722,7 @@ components:
           type: string
           nullable: true
           minLength: 1
-          description: >-
-            Non-empty canonical candidate or null. Do not dictionary-rewrite
-            uncertain names. Serial identifiers remain strings.
+          description: Распознанное значение или null. Серия и номер передаются строками.
         state:
           type: string
           enum: [recognized, uncertain, missing]
@@ -1207,11 +781,11 @@ components:
             - conflicting_field_candidates
             - manual_review_required
             - date_invalid_calendar_or_format
-          description: Initial public field-issue code catalog.
+          description: Код проблемы поля.
         message:
           type: string
           minLength: 1
-          description: Short safe display text without PII; clients must not parse it.
+          description: Краткое сообщение для отображения.
     RecognitionWarning:
       type: object
       additionalProperties: false
@@ -1220,11 +794,11 @@ components:
         code:
           type: string
           enum: [no_fields_recognized]
-          description: Initial public recognition-warning code catalog.
+          description: Код предупреждения.
         message:
           type: string
           minLength: 1
-          description: Short safe display text without PII; clients must not parse it.
+          description: Краткое сообщение для отображения.
     NonEmptyStringFieldResult:
       type: object
       properties:
@@ -1243,7 +817,7 @@ components:
           nullable: true
           format: date
           pattern: '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
-          description: Calendar date validation is also required at runtime.
+          description: Дата проверяется с учётом календаря.
     ErrorResponse:
       type: object
       additionalProperties: false
@@ -1266,18 +840,14 @@ components:
             - processing_timeout
             - not_found
             - method_not_allowed
-          description: >-
-            Machine-readable error code. not_found and method_not_allowed are
-            handler/router fallbacks outside the POST operation and do not imply
-            additional endpoints.
+            - statistics_unavailable
+          description: Машиночитаемый код ошибки.
         message:
           type: string
           minLength: 1
-          description: Safe diagnostic message without uploaded content or PII.
+          description: Сообщение об ошибке.
     ClientInstallationErrorResponse:
-      description: >-
-        Safe error envelope for anonymous client installation enrollment. Its
-        error code set is separate from synchronous and async-job errors.
+      description: Ответ с ошибкой регистрации клиента.
       type: object
       additionalProperties: false
       required: [request_id, code, message]
@@ -1294,12 +864,9 @@ components:
         message:
           type: string
           minLength: 1
-          description: Static safe message without credential hash or storage diagnostics.
+          description: Сообщение об ошибке.
     AsyncErrorResponse:
-      description: >-
-        Error envelope for asynchronous job endpoints. It is separate from the
-        synchronous ErrorResponse so async codes do not alter recognition or
-        statistics contracts.
+      description: Ответ с ошибкой асинхронной операции.
       type: object
       additionalProperties: false
       required: [request_id, code, message]
@@ -1322,15 +889,15 @@ components:
             - method_not_allowed
             - job_not_terminal
             - job_result_gone
-          description: Stable async endpoint error code.
+          description: Код ошибки асинхронной операции.
         message:
           type: string
           minLength: 1
-          description: Safe diagnostic message without uploaded content or PII.
+          description: Сообщение об ошибке.
   examples:
     allFieldsRecognized:
-      summary: All fields have a candidate
-      description: Synthetic example; pipeline_version is not a deployed version.
+      summary: Распознаны все поля
+      description: Пример ответа. Версия конвейера условная.
       value:
         request_id: 94b86c5c-2520-4c0f-b91e-6d4a948fc88a
         status: completed
@@ -1350,8 +917,8 @@ components:
           department_code: {value: '123-456', state: recognized, issues: []}
         warnings: []
     partialResult:
-      summary: Partial result with missing and uncertain fields
-      description: Synthetic example; pipeline_version is not a deployed version.
+      summary: Частичный результат
+      description: Пример ответа. Версия конвейера условная.
       value:
         request_id: 1a2ec415-66c5-4af1-ae13-9eb60e0fd827
         status: completed
@@ -1387,8 +954,8 @@ components:
           department_code: {value: '456-789', state: recognized, issues: []}
         warnings: []
     noFieldsRecognized:
-      summary: Processing completed without any non-null field values
-      description: Synthetic example; this remains a successful 200 response.
+      summary: Данные не распознаны
+      description: Пример успешного ответа без распознанных значений.
       value:
         request_id: 8d83e8ea-aefc-4f01-b0b6-7dc8579bbef3
         status: completed
@@ -1410,8 +977,8 @@ components:
           - code: no_fields_recognized
             message: Не удалось распознать поля. Попробуйте сделать новый снимок.
     imageUnprocessable:
-      summary: Image could not be decoded or processed
-      description: Synthetic example; image_unprocessable is the selected public 422 code.
+      summary: Изображение не обработано
+      description: Пример ответа с ошибкой обработки изображения.
       value:
         request_id: 0bc5454f-4a34-4477-858d-49dd471cd3d4
         code: image_unprocessable

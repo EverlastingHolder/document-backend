@@ -48,12 +48,24 @@ http://:8080 {
 http://:8081 {
 	route {
 		import api_routes
+		@docs_stats {
+			method GET
+			path /v1/stats
+		}
+		handle @docs_stats {
+			reverse_proxy api:8080
+		}
 		@api_namespace path /v1 /v1/*
 		handle @api_namespace {
 			respond "not found" 404
 		}
+		@scalar_assets path /scalar.js /openapi/*
+		handle @scalar_assets {
+			reverse_proxy scalar-reference:8080
+		}
 		handle {
-			reverse_proxy swagger-ui:8080
+			root * /srv/scalar-ui
+			file_server
 		}
 	}
 }

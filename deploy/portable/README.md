@@ -25,13 +25,18 @@ machine's private IPv4 address for both the initial start and later Compose
 commands. The Compose file does not inspect host interfaces or publish the
 API, PostgreSQL, or RabbitMQ ports.
 
-Swagger UI is available separately at `http://127.0.0.1:8081`. It reads the
-checked-in OpenAPI file through a read-only mount and receives no application
-secrets. The docs listener remains loopback-bound when the API is exposed to
-the LAN. Set `PASSPORT_DOCS_BIND` to the host's private IPv4 only if the UI
-also needs LAN access, and restrict TCP 8081 in the firewall. Its `Try it out`
-requests use Caddy's existing API route allowlist; unknown `/v1` routes remain
-404. Do not expose the documentation listener to untrusted networks.
+Scalar API Reference is available separately at `http://127.0.0.1:8081`. It
+reads the checked-in OpenAPI file through a read-only mount and receives no
+application secrets. Its versioned Scalar image serves the JavaScript bundle
+locally, and the custom access page is served from `scalar-ui/`; the browser
+does not load the UI, fonts, or API requests from an external CDN or proxy.
+The docs listener is bound to loopback, even when the API is exposed to the
+LAN. Click **Авторизовать** in the top bar to have Scalar create and register
+a browser credential, then authorize protected requests in that tab. You do
+not need to generate a token manually. The credential remains in page memory
+and is not restored after reload; enrollment sends only its SHA-256 hash. The
+API listener on port 8080 retains its narrower route allowlist. Do not expose
+the documentation listener to other devices.
 
 For example:
 

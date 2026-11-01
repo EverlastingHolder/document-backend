@@ -244,13 +244,15 @@ services:
       private:
         ipv4_address: ${PASSPORT_WORKER_IP:-172.31.0.11}
 
-  swagger-ui:
-    image: docker.swagger.io/swaggerapi/swagger-ui:v5.34.1@sha256:59ee9021a8884437c7fd8aae79e0a46ee6b6dd3afd7f24a587c4501585fde53b
+  scalar-reference:
+    image: scalarapi/api-reference:0.6.21@sha256:5d765bb116a415b7119872e4addc5c1ebfc815a64f33fea3a1ebd8bd10044618
     restart: unless-stopped
     environment:
-      SWAGGER_JSON: /spec/openapi.yaml
+      API_REFERENCE_CONFIG: >-
+        {"sources":[{"url":"/openapi/openapi.yaml"}],"agent":{"disabled":true},"telemetry":false}
+      CDN_URL: /scalar.js
     volumes:
-      - ../../api/openapi.yaml:/spec/openapi.yaml:ro
+      - ../../api/openapi.yaml:/docs/openapi.yaml:ro
     networks:
       - docs
 
@@ -269,16 +271,17 @@ services:
     depends_on:
       api:
         condition: service_healthy
-      swagger-ui:
+      scalar-reference:
         condition: service_started
     environment:
       PASSPORT_CADDY_UID: "10001"
       PASSPORT_CADDY_GID: "10001"
     ports:
       - "${PASSPORT_PUBLIC_BIND:-127.0.0.1}:8080:8080"
-      - "${PASSPORT_DOCS_BIND:-127.0.0.1}:8081:8081"
+      - "127.0.0.1:8081:8081"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./scalar-ui:/srv/scalar-ui:ro
     tmpfs:
       - /run/passport-caddy:mode=0700,uid=10001,gid=10001,size=1m
       - /data:mode=0700,uid=10001,gid=10001,size=16m
