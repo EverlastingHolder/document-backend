@@ -3,7 +3,8 @@
 This directory contains a self-contained Docker Compose deployment for the
 queue-based API. It builds its images from the checked-out repository and
 does not require Go or Python on the host. The OCR build fetches the pinned
-RussianDocsOCR snapshot and verifies every model against its lock file.
+RussianDocsOCR snapshot and verifies every model against its lock file; this
+first build needs network access to fetch those pinned public assets.
 
 From the repository root, start the stack with:
 
@@ -30,14 +31,25 @@ For example:
 PASSPORT_PUBLIC_BIND=192.168.1.40 docker compose -f deploy/portable/compose.yaml up -d --build
 ```
 
+To keep the LAN bind setting for later commands, use the ignored local env
+file from this directory:
+
+```sh
+cd deploy/portable
+cp .env.example .env
+# Edit PASSPORT_PUBLIC_BIND in .env, then:
+docker compose up -d --build
+```
+
 The API, worker, and ingress use fixed addresses inside a private Docker
 network so the existing API peer allowlist remains narrow. If that subnet
 overlaps another network on the host, configure these values together before
 the first start: `PASSPORT_PRIVATE_SUBNET`, `PASSPORT_PRIVATE_DYNAMIC_POOL`,
 `PASSPORT_API_IP`, `PASSPORT_WORKER_IP`, and `PASSPORT_INGRESS_IP`. The
 bootstrap rejects addresses outside the selected subnet or duplicate service
-addresses. Changing the bind or network values after initialization fails
-closed rather than replacing credentials or database volumes.
+addresses. The host bind may change without rotating credentials; changing
+the private network topology fails closed rather than replacing credentials
+or database volumes.
 
 Check services with:
 
@@ -61,3 +73,15 @@ PASSPORT_MAINTENANCE_API_STOPPED=true docker compose --profile ops -f deploy/por
 
 This LAN profile uses HTTP. Use a TLS-terminating deployment for traffic that
 crosses untrusted networks; this Compose file does not configure public TLS.
+
+## Rehearsal boundary
+
+The portable stack was cold-started and rerun on an isolated Linux ARM64
+Docker engine. After `down` without volume removal and `up --build`, all
+services became healthy and the seven generated secret/config fingerprints,
+PostgreSQL schema/data, and RabbitMQ node identity remained stable. A synthetic
+blank-image job reached the expected terminal `image_unprocessable` state on
+attempt 1; receipt returned 204, status returned 410, and the test image/result
+cleanup checks were zero. This verifies deployment, persistence, and the
+receipt/retention path. It does not establish OCR recognition quality, native
+AMD64 behavior, Windows/WSL2 LAN forwarding, or production capacity.

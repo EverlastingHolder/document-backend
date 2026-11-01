@@ -4,7 +4,7 @@
 
 ## Запуск через Docker Compose
 
-Нужны Docker Engine и плагин Docker Compose. Первая сборка требует доступа в сеть для загрузки необходимых компонентов. Go и Python на хосте устанавливать не требуется.
+Нужны Docker Engine и плагин Docker Compose. Первая сборка требует доступа в сеть, чтобы скачать закреплённые RussianDocsOCR runtime и модельные файлы. Go и Python на хосте устанавливать не требуется.
 
 ```sh
 git clone https://github.com/EverlastingHolder/document-backend.git
@@ -18,10 +18,16 @@ HTTP endpoint по умолчанию доступен на `http://127.0.0.1:80
 docker compose ps
 ```
 
+Для доступа из локальной сети скопируйте `deploy/portable/.env.example` в
+`deploy/portable/.env` и задайте `PASSPORT_PUBLIC_BIND` равным частному IPv4
+адресу Linux-хоста. Ограничьте входящий TCP 8080 firewall-правилом для
+доверенной сети. Текущий debug APK можно направить на `http://<адрес-хоста>:8080`;
+release APK требует HTTPS. LAN forwarding через WSL2 отдельно не проверен.
+
 Остановить сервисы, сохранив данные в именованных volumes:
 
 ```sh
 docker compose down
 ```
 
-Не добавляйте `--volumes`, если нужно сохранить данные. Настройка доступа из локальной сети описана в [руководстве по portable Compose](deploy/portable/README.md). Список API операций приведён в [контракте API](api/openapi.yaml).
+Не добавляйте `--volumes`, если нужно сохранить данные. Настройка LAN и другие параметры описаны в [руководстве по portable Compose](deploy/portable/README.md). Список API операций приведён в [контракте API](api/openapi.yaml).
